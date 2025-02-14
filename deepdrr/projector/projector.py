@@ -172,6 +172,7 @@ class Projector(object):
     def __init__(
         self,
         volume: Union[vol.Volume, List[vol.Volume]],
+        volumeIsProvidedAsExternalGPUMemory : bool = False,
         priorities: Optional[List[int]] = None,
         camera_intrinsics: Optional[geo.CameraIntrinsicTransform] = None,
         device: Optional[Device] = None,
@@ -223,6 +224,11 @@ class Projector(object):
             source_to_detector_distance (float, optional): If `device` is not provided, this is the distance from the source to the detector. This limits the lenght rays are traced for. Defaults to -1 (no limit).
             carm (MobileCArm, optional): Deprecated alias for `device`. See `device`.
         """
+
+        self.volumeIsProvidedAsExternalGPUMemory = volumeIsProvidedAsExternalGPUMemory
+        #self.volumeGPU = volumeGPU
+        #self.volumeGPUTexRef = volumeGPUTexRef
+        #self.seg_for_vol_extern = seg_for_vol_extern
 
         # set variables
         volume = utils.listify(volume)
@@ -883,6 +889,38 @@ class Projector(object):
             # NULL. Don't need to do solid angle calculation
             self.solid_angle_gpu = np.int32(0)
 
+    def updateVolumeAsGPUArray(self, vol_gpu):
+        for vol_id, volume in enumerate(self.volumes):
+            vol_texref = self.mod.get_texref(f"volume_{vol_id}")
+            cuda.bind_array_to_texref(vol_gpu, vol_texref)
+
+    def updateMasksAsGPUArray(self, masksOnGPU_array, masksOnGPU_gpuarray):
+        for vol_id, _vol in enumerate(self.volumes):
+            seg_for_vol = []
+            texref_for_vol = []
+            for mat_id, mat in enumerate(self.all_materials):
+                seg = None
+                if mat in _vol.materials:
+                    seg = _vol.materials[mat]
+
+
+                seg_from_gpu = np.ascontiguousarray(np.empty(seg.shape, dtype=np.float32))
+                cuda.memcpy_dtoh(seg_from_gpu, masksOnGPU_gpuarray[mat_id].gpudata)
+                _vol.materials[mat] = seg_from_gpu
+                seg_for_vol.append(
+                    masksOnGPU_array[mat_id]
+                )
+
+                texref = self.mod.get_texref(f"seg_{vol_id}_{mat_id}")
+                texref_for_vol.append(texref)
+
+            for seg, texref in zip(seg_for_vol, texref_for_vol):
+                cuda.bind_array_to_texref(seg, texref)
+                if self.mode == "linear":
+                    texref.set_filter_mode(cuda.filter_mode.LINEAR)
+                else:
+                    raise RuntimeError("Invalid texref filter mode")
+
     def initialize(self):
         """Allocate GPU memory and transfer the volume, segmentations to GPU."""
         if self.initialized:
@@ -897,14 +935,16 @@ class Projector(object):
         # allocate and transfer the volume texture to GPU
         self.volumes_gpu = []
         self.volumes_texref = []
-        for vol_id, volume in enumerate(self.volumes):
-            volume = np.array(volume)
-            volume = np.moveaxis(volume, [0, 1, 2], [2, 1, 0]).copy()
-            vol_gpu = cuda.np_to_array(volume, order="C")
-            vol_texref = self.mod.get_texref(f"volume_{vol_id}")
-            cuda.bind_array_to_texref(vol_gpu, vol_texref)
-            self.volumes_gpu.append(vol_gpu)
-            self.volumes_texref.append(vol_texref)
+
+        if not self.volumeIsProvidedAsExternalGPUMemory:
+            for vol_id, volume in enumerate(self.volumes):
+                volume = np.array(volume)
+                volume = np.moveaxis(volume, [0, 1, 2], [2, 1, 0]).copy()
+                vol_gpu = cuda.np_to_array(volume, order="C")
+                vol_texref = self.mod.get_texref(f"volume_{vol_id}")
+                cuda.bind_array_to_texref(vol_gpu, vol_texref)
+                self.volumes_gpu.append(vol_gpu)
+                self.volumes_texref.append(vol_texref)
 
         init_tock = time.perf_counter()
         log.debug(f"time elapsed after intializing volumes: {init_tock - init_tick}")
@@ -929,11 +969,13 @@ class Projector(object):
                     seg = _vol.materials[mat]
                 else:
                     seg = np.zeros(_vol.shape).astype(np.float32)
-                seg_for_vol.append(
-                    cuda.np_to_array(
-                        np.moveaxis(seg, [0, 1, 2], [2, 1, 0]).copy(), order="C"
+                if not self.volumeIsProvidedAsExternalGPUMemory:
+                    seg_for_vol.append(
+                        cuda.np_to_array(
+                            np.moveaxis(seg, [0, 1, 2], [2, 1, 0]).copy(), order="C"
+                        )
                     )
-                )
+
                 texref = self.mod.get_texref(f"seg_{vol_id}_{mat_id}")
                 texref_for_vol.append(texref)
 
@@ -945,7 +987,7 @@ class Projector(object):
                     raise RuntimeError("Invalid texref filter mode")
 
             self.segmentations_gpu.append(seg_for_vol)
-            self.segmentations_texref.append(texref)
+            self.segmentations_texref.append(texref_for_vol)
 
         init_tock = time.perf_counter()
         log.debug(
