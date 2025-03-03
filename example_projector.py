@@ -9,21 +9,31 @@ from deepdrr.projector import Projector
 
 def main():
     output_dir = test_utils.get_output_dir()
-    data_dir = test_utils.download_sampledata("CTPelvic1K_sample")
-    patient = deepdrr.Volume.from_nifti(
-        data_dir / "dataset6_CLINIC_0001_data.nii.gz", use_thresholding=True
+    data_dir = test_utils.download_sampledata("CT-chest")
+    volume = deepdrr.Volume.from_nrrd(
+        data_dir
     )
-    patient.faceup()
+    #patient.faceup()
 
     # define the simulated C-arm
-    carm = deepdrr.MobileCArm(patient.center_in_world + geo.v(0, 0, -300))
+    carm = deepdrr.MobileCArm(isocenter=volume.center_in_world, alpha=90, beta=90, degrees=True, pixel_size=0.5)
 
     # project in the AP view
-    with Projector(patient, carm=carm) as projector:
-        carm.move_to(alpha=0, beta=0)
-        image = projector()
+    with deepdrr.Projector(
+        volume=volume,
+        carm=carm,
+        step=0.1,  # stepsize along projection ray, measured in voxels
+        spectrum="90KV_AL40", # energy spectrum
+        photon_count=100000, # number of photons to simulate
+        scatter_num=0, # number of scatter events to simulate
+        neglog=True, # apply negative log transform to image (convenient for visualization)
+        intensity_upper_bound=3, # Good default for windowing
+    ) as projector:
+        #carm.move_to(isocenter_in_world=volume.center_in_world + geo.v(0, 0, z))
+        #print(f"Projecting at z={z}")
+        image = projector.project()
 
-    path = output_dir / "example_projector.png"
+    path = output_dir / "example_projector_new_inter.png"
     image_utils.save(path, image)
     print(f"saved example projection image to {path.absolute()}")
 

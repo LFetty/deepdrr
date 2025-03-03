@@ -103,6 +103,7 @@ def _get_kernel_projector_module(
         SourceModule: pycuda SourceModule object.
 
     """
+    
     # path to files for cubic interpolation (folder cubic in DeepDRR)
     d = Path(__file__).resolve().parent
     bicubic_path = str(d / "cubic")
@@ -921,6 +922,128 @@ class Projector(object):
                 else:
                     raise RuntimeError("Invalid texref filter mode")
 
+
+    def init_textures_for_ct(self):
+        # Create CUDA arrays and texture objects
+        volume_arrays = []
+        volume_textures = []
+
+        for vol in self.volumes:
+            # For volume data
+            vol_data = np.array(vol)
+            vol_data = np.moveaxis(vol_data, [0, 1, 2], [2, 1, 0]).copy()
+            
+            # Create 3D CUDA array for volume
+            vol_descriptor = cuda.ArrayDescriptor3D()
+            vol_descriptor.width = vol_data.shape[2]
+            vol_descriptor.height = vol_data.shape[1]
+            vol_descriptor.depth = vol_data.shape[0]
+            vol_descriptor.format = cuda.dtype_to_array_format(np.float32)
+            vol_descriptor.num_channels = 1
+            vol_descriptor.flags = 0
+            
+            vol_array = cuda.Array(vol_descriptor)
+            
+            # Copy data to CUDA array
+            copy = cuda.Memcpy3D()
+            copy.set_src_host(vol_data)
+            copy.set_dst_array(vol_array)
+            copy.width_in_bytes = copy.src_pitch = vol_data.strides[1]
+            copy.src_height = copy.height = vol_data.shape[1]
+            copy.depth = vol_data.shape[0]
+            copy()
+            
+            volume_arrays.append(vol_array)
+            
+            # Create texture object for volume
+            resource_desc = cuda.texture.ResourceDescriptor()
+            resource_desc.restype = cuda.resource_type.ARRAY
+            resource_desc.res.array.array = vol_array
+            
+            tex_desc = cuda.TextureDescriptor()
+            tex_desc.addressMode = (cuda.address_mode.CLAMP, 
+                                cuda.address_mode.CLAMP, 
+                                cuda.address_mode.CLAMP)
+            tex_desc.filterMode = cuda.filter_mode.LINEAR
+            tex_desc.readMode = cuda.read_mode.ELEMENT_TYPE
+            tex_desc.normalizedCoords = 0
+            
+            vol_tex = cuda.TextureObject(resource_desc, tex_desc)
+            volume_textures.append(vol_tex)
+            
+        return volume_arrays, volume_textures
+
+
+    def init_textures_for_seg(self):
+        # Create CUDA arrays and texture objects
+
+        seg_arrays = []
+        seg_textures = []
+        
+        tex_desc = cuda.TextureDescriptor()
+        tex_desc.addressMode = (cuda.address_mode.CLAMP, 
+                            cuda.address_mode.CLAMP, 
+                            cuda.address_mode.CLAMP)
+        tex_desc.filterMode = cuda.filter_mode.LINEAR
+        tex_desc.readMode = cuda.read_mode.ELEMENT_TYPE
+        tex_desc.normalizedCoords = 0
+        
+        for vol_id, _vol in enumerate(self.volumes):
+            seg_for_vol = []
+            texref_for_vol = []
+            for mat_id, mat in enumerate(self.all_materials):
+                seg = None
+                if mat in _vol.materials:
+                    seg = _vol.materials[mat]
+                else:
+                    seg = np.zeros(_vol.shape).astype(np.float32)
+                if not self.volumeIsProvidedAsExternalGPUMemory:
+                    seg_vol = np.moveaxis(seg, [0, 1, 2], [2, 1, 0]).copy()
+
+                    seg_data_mat = seg_vol.astype(np.float32)
+                    
+                    # Create 3D CUDA array for segmentation
+                    seg_descriptor = cuda.ArrayDescriptor3D()
+                    seg_descriptor.width = seg_data_mat.shape[2]
+                    seg_descriptor.height = seg_data_mat.shape[1]
+                    seg_descriptor.depth = seg_data_mat.shape[0]
+                    seg_descriptor.format = cuda.dtype_to_array_format(np.float32)
+                    seg_descriptor.num_channels = 1
+                    seg_descriptor.flags = 0
+                    
+                    seg_array = cuda.Array(seg_descriptor)
+                    
+                    # Copy data to CUDA array
+                    copy = cuda.Memcpy3D()
+                    copy.set_src_host(seg_data_mat)
+                    copy.set_dst_array(seg_array)
+                    copy.width_in_bytes = copy.src_pitch = seg_data_mat.strides[1]
+                    copy.src_height = copy.height = seg_data_mat.shape[1]
+                    copy.depth = seg_data_mat.shape[0]
+                    copy()
+                    
+                    seg_for_vol.append(seg_array)
+                    
+                    # Create texture object for segmentation
+                    resource_desc = cuda.ResourceDescriptor()
+                    resource_desc.restype = cuda.resource_type.ARRAY
+                    resource_desc.res.array.array = seg_array
+                    
+                    seg_tex = cuda.TextureObject(resource_desc, tex_desc)  # Reuse tex_desc
+                    texref_for_vol.append(seg_tex)
+        
+            seg_arrays.append(seg_for_vol)
+            seg_textures.append(texref_for_vol)
+            
+        flat_seg_textures = []
+        flat_seg_vol = []
+        for vol_textures, vol_arrays in zip(seg_textures, seg_arrays):
+            flat_seg_textures.extend(vol_textures)
+            flat_seg_vol.extend(vol_arrays)
+        
+        return flat_seg_vol, flat_seg_textures
+
+
     def initialize(self):
         """Allocate GPU memory and transfer the volume, segmentations to GPU."""
         if self.initialized:
@@ -933,61 +1056,55 @@ class Projector(object):
         init_tick = time.perf_counter()
 
         # allocate and transfer the volume texture to GPU
-        self.volumes_gpu = []
-        self.volumes_texref = []
+        
+        
 
         if not self.volumeIsProvidedAsExternalGPUMemory:
-            for vol_id, volume in enumerate(self.volumes):
-                volume = np.array(volume)
-                volume = np.moveaxis(volume, [0, 1, 2], [2, 1, 0]).copy()
-                vol_gpu = cuda.np_to_array(volume, order="C")
-                vol_texref = self.mod.get_texref(f"volume_{vol_id}")
-                cuda.bind_array_to_texref(vol_gpu, vol_texref)
-                self.volumes_gpu.append(vol_gpu)
-                self.volumes_texref.append(vol_texref)
+
+            self.volumes_gpu, self.volumes_texref = self.init_textures_for_ct()
 
         init_tock = time.perf_counter()
         log.debug(f"time elapsed after intializing volumes: {init_tock - init_tick}")
 
         # set the interpolation mode
-        if self.mode == "linear":
-            for texref in self.volumes_texref:
-                texref.set_filter_mode(cuda.filter_mode.LINEAR)
-        else:
-            raise RuntimeError
+        # if self.mode == "linear":
+        #     for texref in self.volumes_texref:
+        #         texref.set_filter_mode(cuda.filter_mode.LINEAR)
+        # else:
+        #     raise RuntimeError
 
         # List[List[segmentations]], indexing by (vol_id, material_id)
-        self.segmentations_gpu = []
+        self.segmentations_gpu, self.segmentations_texref = self.init_textures_for_seg()
         # List[List[texrefs]], indexing by (vol_id, material_id)
-        self.segmentations_texref = []
-        for vol_id, _vol in enumerate(self.volumes):
-            seg_for_vol = []
-            texref_for_vol = []
-            for mat_id, mat in enumerate(self.all_materials):
-                seg = None
-                if mat in _vol.materials:
-                    seg = _vol.materials[mat]
-                else:
-                    seg = np.zeros(_vol.shape).astype(np.float32)
-                if not self.volumeIsProvidedAsExternalGPUMemory:
-                    seg_for_vol.append(
-                        cuda.np_to_array(
-                            np.moveaxis(seg, [0, 1, 2], [2, 1, 0]).copy(), order="C"
-                        )
-                    )
+        #self.segmentations_texref = []
+        # for vol_id, _vol in enumerate(self.volumes):
+        #     seg_for_vol = []
+        #     texref_for_vol = []
+        #     for mat_id, mat in enumerate(self.all_materials):
+        #         seg = None
+        #         if mat in _vol.materials:
+        #             seg = _vol.materials[mat]
+        #         else:
+        #             seg = np.zeros(_vol.shape).astype(np.float32)
+        #         if not self.volumeIsProvidedAsExternalGPUMemory:
+        #             seg_for_vol.append(
+        #                 cuda.np_to_array(
+        #                     np.moveaxis(seg, [0, 1, 2], [2, 1, 0]).copy(), order="C"
+        #                 )
+        #             )
 
-                texref = self.mod.get_texref(f"seg_{vol_id}_{mat_id}")
-                texref_for_vol.append(texref)
+        #         texref = self.mod.get_texref(f"seg_{vol_id}_{mat_id}")
+        #         texref_for_vol.append(texref)
 
-            for seg, texref in zip(seg_for_vol, texref_for_vol):
-                cuda.bind_array_to_texref(seg, texref)
-                if self.mode == "linear":
-                    texref.set_filter_mode(cuda.filter_mode.LINEAR)
-                else:
-                    raise RuntimeError("Invalid texref filter mode")
+        #     for seg, texref in zip(seg_for_vol, texref_for_vol):
+        #         cuda.bind_array_to_texref(seg, texref)
+        #         if self.mode == "linear":
+        #             texref.set_filter_mode(cuda.filter_mode.LINEAR)
+        #         else:
+        #             raise RuntimeError("Invalid texref filter mode")
 
-            self.segmentations_gpu.append(seg_for_vol)
-            self.segmentations_texref.append(texref_for_vol)
+        #     self.segmentations_gpu.append(seg_for_vol)
+        #     self.segmentations_texref.append(texref_for_vol)
 
         init_tock = time.perf_counter()
         log.debug(
