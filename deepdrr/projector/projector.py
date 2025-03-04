@@ -9,7 +9,6 @@ import os
 import warnings
 
 import math
-import torch
 import numpy as np
 
 from .. import geo, utils, vol
@@ -26,6 +25,9 @@ from .material_coefficients import material_coefficients
 from .mcgpu_compton_data import COMPTON_DATA
 from .mcgpu_mfp_data import MFP_DATA
 from .mcgpu_rita_samplers import rita_samplers
+import cupy as cp
+from cupy.cuda import runtime
+
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +62,37 @@ def import_pycuda():
 NUMBYTES_INT8 = 1
 NUMBYTES_INT32 = 4
 NUMBYTES_FLOAT32 = 4
+
+
+def _get_texture(array:np.ndarray) -> cp.cuda.TextureObject:
+    """Get a texture object from a numpy array.
+
+    Args:
+        array (np.ndarray): The array to convert to a texture object.
+
+    Returns:
+        cupy.cuda.TextureObject: The texture object.
+    """
+    # Create 3D CUDA array for segmentation
+    tex_desc = cp.cuda.texture.TextureDescriptor(addressModes=(runtime.cudaAddressModeClamp, runtime.cudaAddressModeClamp, runtime.cudaAddressModeClamp),
+                                         filterMode=runtime.cudaFilterModeLinear,
+                                         readMode=runtime.cudaReadModeElementType, 
+                                         borderColors=None, 
+                                         normalizedCoords=False)
+    resource_desc = cp.cuda.texture.ResourceDescriptor(restype=runtime.cudaResourceTypeArray, 
+                                                       #CUDAarray cuArr=None, 
+                                                       arr=cp.asarray(np.moveaxis(array, [0, 1, 2], [2, 1, 0]).copy(), order='C'), 
+                                                       #ChannelFormatDescriptor chDesc=None, 
+                                                       #size_t sizeInBytes=0, 
+                                                       #size_t width=0, 
+                                                       #size_t height=0, 
+                                                       )
+                    
+                    # Create texture object  
+    texture = cp.cuda.texture.TextureObject(resource_desc, tex_desc)
+    return texture
+    
+
 
 
 def _get_spectrum(spectrum: Union[np.ndarray, str]):
@@ -436,32 +469,19 @@ class Projector(object):
             world_from_index = np.array(proj.world_from_index[:-1, :]).astype(
                 np.float32
             )
-            cuda.memcpy_htod(self.world_from_index_gpu, world_from_index)
+            self.world_from_index_gpu = world_from_index
 
             for vol_id, _vol in enumerate(self.volumes):
                 source_ijk = np.array(
                     _vol.IJK_from_world @ proj.center_in_world
                 ).astype(np.float32)
-                cuda.memcpy_htod(
-                    int(self.sourceX_gpu) + int(NUMBYTES_INT32 * vol_id),
-                    np.array([source_ijk[0]]),
-                )
-                cuda.memcpy_htod(
-                    int(self.sourceY_gpu) + int(NUMBYTES_INT32 * vol_id),
-                    np.array([source_ijk[1]]),
-                )
-                cuda.memcpy_htod(
-                    int(self.sourceZ_gpu) + int(NUMBYTES_INT32 * vol_id),
-                    np.array([source_ijk[2]]),
-                )
+                self.sourceX_gpu[vol_id] = cp.array([source_ijk[0]])
+                self.sourceY_gpu[vol_id] = cp.array([source_ijk[1]])
+                self.sourceZ_gpu[vol_id] = cp.array([source_ijk[2]])
 
                 # TODO: prefer toarray() to get transform throughout
                 IJK_from_world = _vol.IJK_from_world.toarray()
-                cuda.memcpy_htod(
-                    int(self.ijk_from_world_gpu)
-                    + (IJK_from_world.size * NUMBYTES_FLOAT32) * vol_id,
-                    IJK_from_world,
-                )
+                self.ijk_from_world_gpu[IJK_from_world.size * vol_id] = IJK_from_world
 
             args = [
                 np.int32(proj.sensor_width),  # out_width
@@ -510,7 +530,7 @@ class Projector(object):
                 offset_w = np.int32(0)
                 offset_h = np.int32(0)
                 self.project_kernel(
-                    *args, offset_w, offset_h, block=block, grid=(blocks_w, blocks_h)
+                    *args, offset_w, offset_h, self.volumes_texref, self.segmentations_texref, block=block, grid=(blocks_w, blocks_h)
                 )
             else:
                 log.debug("Running kernel patchwise")
@@ -522,25 +542,30 @@ class Projector(object):
                             *args,
                             offset_w,
                             offset_h,
+                            self.volumes_texref, 
+                            self.segmentations_texref,
                             block=block,
                             grid=(self.max_block_index, self.max_block_index),
                         )
-                        context.synchronize()
+                        #TODO:required?
+                        #context.synchronize()
 
             project_tock = time.perf_counter()
             log.debug(
                 f"projection #{i}: time elapsed after call to project_kernel: {project_tock - project_tick}"
             )
 
-            intensity = np.zeros(self.output_shape, dtype=np.float32)
-            cuda.memcpy_dtoh(intensity, self.intensity_gpu)
+            #intensity = np.zeros(self.output_shape, dtype=np.float32)
+            #cuda.memcpy_dtoh(intensity, self.intensity_gpu)
+            intensity = cp.asnumpy(self.intensity_gpu)
             # transpose the axes, which previously have width on the slow dimension
             log.debug("copied intensity from gpu")
             intensity = np.swapaxes(intensity, 0, 1).copy()
             log.debug("swapped intensity")
 
-            photon_prob = np.zeros(self.output_shape, dtype=np.float32)
-            cuda.memcpy_dtoh(photon_prob, self.photon_prob_gpu)
+            # photon_prob = np.zeros(self.output_shape, dtype=np.float32)
+            # cuda.memcpy_dtoh(photon_prob, self.photon_prob_gpu)
+            photon_prob = cp.asnumpy(self.photon_prob_gpu)
             log.debug("copied photon_prob")
             photon_prob = np.swapaxes(photon_prob, 0, 1).copy()
             log.debug("swapped photon_prob")
@@ -925,123 +950,34 @@ class Projector(object):
 
     def init_textures_for_ct(self):
         # Create CUDA arrays and texture objects
-        volume_arrays = []
         volume_textures = []
 
         for vol in self.volumes:
             # For volume data
             vol_data = np.array(vol)
-            vol_data = np.moveaxis(vol_data, [0, 1, 2], [2, 1, 0]).copy()
+            texture = _get_texture(vol_data)
+            volume_textures.append(texture)
             
-            # Create 3D CUDA array for volume
-            vol_descriptor = cuda.ArrayDescriptor3D()
-            vol_descriptor.width = vol_data.shape[2]
-            vol_descriptor.height = vol_data.shape[1]
-            vol_descriptor.depth = vol_data.shape[0]
-            vol_descriptor.format = cuda.dtype_to_array_format(np.float32)
-            vol_descriptor.num_channels = 1
-            vol_descriptor.flags = 0
-            
-            vol_array = cuda.Array(vol_descriptor)
-            
-            # Copy data to CUDA array
-            copy = cuda.Memcpy3D()
-            copy.set_src_host(vol_data)
-            copy.set_dst_array(vol_array)
-            copy.width_in_bytes = copy.src_pitch = vol_data.strides[1]
-            copy.src_height = copy.height = vol_data.shape[1]
-            copy.depth = vol_data.shape[0]
-            copy()
-            
-            volume_arrays.append(vol_array)
-            
-            # Create texture object for volume
-            resource_desc = cuda.texture.ResourceDescriptor()
-            resource_desc.restype = cuda.resource_type.ARRAY
-            resource_desc.res.array.array = vol_array
-            
-            tex_desc = cuda.TextureDescriptor()
-            tex_desc.addressMode = (cuda.address_mode.CLAMP, 
-                                cuda.address_mode.CLAMP, 
-                                cuda.address_mode.CLAMP)
-            tex_desc.filterMode = cuda.filter_mode.LINEAR
-            tex_desc.readMode = cuda.read_mode.ELEMENT_TYPE
-            tex_desc.normalizedCoords = 0
-            
-            vol_tex = cuda.TextureObject(resource_desc, tex_desc)
-            volume_textures.append(vol_tex)
-            
-        return volume_arrays, volume_textures
+        return volume_textures
 
 
     def init_textures_for_seg(self):
         # Create CUDA arrays and texture objects
 
-        seg_arrays = []
         seg_textures = []
-        
-        tex_desc = cuda.TextureDescriptor()
-        tex_desc.addressMode = (cuda.address_mode.CLAMP, 
-                            cuda.address_mode.CLAMP, 
-                            cuda.address_mode.CLAMP)
-        tex_desc.filterMode = cuda.filter_mode.LINEAR
-        tex_desc.readMode = cuda.read_mode.ELEMENT_TYPE
-        tex_desc.normalizedCoords = 0
-        
+       
         for vol_id, _vol in enumerate(self.volumes):
-            seg_for_vol = []
-            texref_for_vol = []
             for mat_id, mat in enumerate(self.all_materials):
                 seg = None
                 if mat in _vol.materials:
                     seg = _vol.materials[mat]
                 else:
                     seg = np.zeros(_vol.shape).astype(np.float32)
-                if not self.volumeIsProvidedAsExternalGPUMemory:
-                    seg_vol = np.moveaxis(seg, [0, 1, 2], [2, 1, 0]).copy()
-
-                    seg_data_mat = seg_vol.astype(np.float32)
-                    
-                    # Create 3D CUDA array for segmentation
-                    seg_descriptor = cuda.ArrayDescriptor3D()
-                    seg_descriptor.width = seg_data_mat.shape[2]
-                    seg_descriptor.height = seg_data_mat.shape[1]
-                    seg_descriptor.depth = seg_data_mat.shape[0]
-                    seg_descriptor.format = cuda.dtype_to_array_format(np.float32)
-                    seg_descriptor.num_channels = 1
-                    seg_descriptor.flags = 0
-                    
-                    seg_array = cuda.Array(seg_descriptor)
-                    
-                    # Copy data to CUDA array
-                    copy = cuda.Memcpy3D()
-                    copy.set_src_host(seg_data_mat)
-                    copy.set_dst_array(seg_array)
-                    copy.width_in_bytes = copy.src_pitch = seg_data_mat.strides[1]
-                    copy.src_height = copy.height = seg_data_mat.shape[1]
-                    copy.depth = seg_data_mat.shape[0]
-                    copy()
-                    
-                    seg_for_vol.append(seg_array)
-                    
-                    # Create texture object for segmentation
-                    resource_desc = cuda.ResourceDescriptor()
-                    resource_desc.restype = cuda.resource_type.ARRAY
-                    resource_desc.res.array.array = seg_array
-                    
-                    seg_tex = cuda.TextureObject(resource_desc, tex_desc)  # Reuse tex_desc
-                    texref_for_vol.append(seg_tex)
+                
+                texture = _get_texture(seg)
+                seg_textures.extend(texture)
         
-            seg_arrays.append(seg_for_vol)
-            seg_textures.append(texref_for_vol)
-            
-        flat_seg_textures = []
-        flat_seg_vol = []
-        for vol_textures, vol_arrays in zip(seg_textures, seg_arrays):
-            flat_seg_textures.extend(vol_textures)
-            flat_seg_vol.extend(vol_arrays)
-        
-        return flat_seg_vol, flat_seg_textures
+        return seg_textures
 
 
     def initialize(self):
@@ -1057,54 +993,15 @@ class Projector(object):
 
         # allocate and transfer the volume texture to GPU
         
-        
-
-        if not self.volumeIsProvidedAsExternalGPUMemory:
-
-            self.volumes_gpu, self.volumes_texref = self.init_textures_for_ct()
+        self.volumes_texref = self.init_textures_for_ct()
 
         init_tock = time.perf_counter()
         log.debug(f"time elapsed after intializing volumes: {init_tock - init_tick}")
 
-        # set the interpolation mode
-        # if self.mode == "linear":
-        #     for texref in self.volumes_texref:
-        #         texref.set_filter_mode(cuda.filter_mode.LINEAR)
-        # else:
-        #     raise RuntimeError
-
         # List[List[segmentations]], indexing by (vol_id, material_id)
-        self.segmentations_gpu, self.segmentations_texref = self.init_textures_for_seg()
+        self.segmentations_texref = self.init_textures_for_seg()
         # List[List[texrefs]], indexing by (vol_id, material_id)
-        #self.segmentations_texref = []
-        # for vol_id, _vol in enumerate(self.volumes):
-        #     seg_for_vol = []
-        #     texref_for_vol = []
-        #     for mat_id, mat in enumerate(self.all_materials):
-        #         seg = None
-        #         if mat in _vol.materials:
-        #             seg = _vol.materials[mat]
-        #         else:
-        #             seg = np.zeros(_vol.shape).astype(np.float32)
-        #         if not self.volumeIsProvidedAsExternalGPUMemory:
-        #             seg_for_vol.append(
-        #                 cuda.np_to_array(
-        #                     np.moveaxis(seg, [0, 1, 2], [2, 1, 0]).copy(), order="C"
-        #                 )
-        #             )
 
-        #         texref = self.mod.get_texref(f"seg_{vol_id}_{mat_id}")
-        #         texref_for_vol.append(texref)
-
-        #     for seg, texref in zip(seg_for_vol, texref_for_vol):
-        #         cuda.bind_array_to_texref(seg, texref)
-        #         if self.mode == "linear":
-        #             texref.set_filter_mode(cuda.filter_mode.LINEAR)
-        #         else:
-        #             raise RuntimeError("Invalid texref filter mode")
-
-        #     self.segmentations_gpu.append(seg_for_vol)
-        #     self.segmentations_texref.append(texref_for_vol)
 
         init_tock = time.perf_counter()
         log.debug(
@@ -1112,61 +1009,40 @@ class Projector(object):
         )
 
         # allocate volumes' priority level on the GPU
-        self.priorities_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_INT32)
+        self.priorities_gpu = cp.zeros(len(self.volumes), dtype=cp.int32)
         for vol_id, prio in enumerate(self.priorities):
-            cuda.memcpy_htod(
-                int(self.priorities_gpu) + (NUMBYTES_INT32 * vol_id), np.int32(prio)
-            )
+            self.priorities_gpu[vol_id] = np.int32(prio)
 
         # allocate gVolumeEdge{Min,Max}Point{X,Y,Z} and gVoxelElementSize{X,Y,Z} on the GPU
-        self.minPointX_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-        self.minPointY_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-        self.minPointZ_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-
-        self.maxPointX_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-        self.maxPointY_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-        self.maxPointZ_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-
-        self.voxelSizeX_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-        self.voxelSizeY_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-        self.voxelSizeZ_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
+        self.minPointX_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.minPointY_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.minPointZ_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.maxPointX_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.maxPointY_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.maxPointZ_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.voxelSizeX_gpu =cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.voxelSizeY_gpu =cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.voxelSizeZ_gpu =cp.zeros(len(self.volumes), dtype=cp.float32)
 
         for i, _vol in enumerate(self.volumes):
             gpu_ptr_offset = NUMBYTES_FLOAT32 * i
-            cuda.memcpy_htod(int(self.minPointX_gpu) + gpu_ptr_offset, np.float32(-0.5))
-            cuda.memcpy_htod(int(self.minPointY_gpu) + gpu_ptr_offset, np.float32(-0.5))
-            cuda.memcpy_htod(int(self.minPointZ_gpu) + gpu_ptr_offset, np.float32(-0.5))
+            self.minPointX_gpu = np.float32(-0.5)
+            self.minPointY_gpu = np.float32(-0.5)
+            self.minPointZ_gpu = np.float32(-0.5)
 
-            cuda.memcpy_htod(
-                int(self.maxPointX_gpu) + gpu_ptr_offset,
-                np.float32(_vol.shape[0] - 0.5),
-            )
-            cuda.memcpy_htod(
-                int(self.maxPointY_gpu) + gpu_ptr_offset,
-                np.float32(_vol.shape[1] - 0.5),
-            )
-            cuda.memcpy_htod(
-                int(self.maxPointZ_gpu) + gpu_ptr_offset,
-                np.float32(_vol.shape[2] - 0.5),
-            )
-            cuda.memcpy_htod(
-                int(self.voxelSizeX_gpu) + gpu_ptr_offset,
-                np.float32(_vol.spacing[0]),
-            )
-            cuda.memcpy_htod(
-                int(self.voxelSizeY_gpu) + gpu_ptr_offset,
-                np.float32(_vol.spacing[1]),
-            )
-            cuda.memcpy_htod(
-                int(self.voxelSizeZ_gpu) + gpu_ptr_offset,
-                np.float32(_vol.spacing[2]),
-            )
+            self.maxPointX_gpu = np.float32(_vol.shape[0] - 0.5)
+            self.maxPointY_gpu = np.float32(_vol.shape[1] - 0.5)
+            self.maxPointZ_gpu = np.float32(_vol.shape[2] - 0.5)
+            
+            self.voxelSizeX_gpu =np.float32(_vol.spacing[0])
+            self.voxelSizeY_gpu =np.float32(_vol.spacing[1])
+            self.voxelSizeZ_gpu =np.float32(_vol.spacing[2])
         log.debug(f"gVolume information allocated and copied to GPU")
 
         # allocate source coord.s on GPU (4 bytes for each of {x,y,z} for each volume)
-        self.sourceX_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-        self.sourceY_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
-        self.sourceZ_gpu = cuda.mem_alloc(len(self.volumes) * NUMBYTES_FLOAT32)
+        self.sourceX_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.sourceY_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.sourceZ_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
 
         init_tock = time.perf_counter()
         log.debug(
@@ -1174,12 +1050,10 @@ class Projector(object):
         )
 
         # allocate world_from_index matrix array on GPU (3x3 array x 4 bytes per float32)
-        self.world_from_index_gpu = cuda.mem_alloc(3 * 3 * NUMBYTES_FLOAT32)
+        self.world_from_index_gpu = cp.zeros(3 * 3, dtype=cp.float32)
 
         # allocate ijk_from_world for each volume.
-        self.ijk_from_world_gpu = cuda.mem_alloc(
-            len(self.volumes) * 3 * 4 * NUMBYTES_FLOAT32
-        )
+        self.ijk_from_world_gpu = cp.zeros(len(self.volumes) * 3 * 4, dtype=cp.float32)
 
         # Initializes the output_shape as well.
         self.initialize_output_arrays(self.camera_intrinsics.sensor_size)
@@ -1189,8 +1063,7 @@ class Projector(object):
         noncont_energies = self.spectrum[:, 0].copy() / 1000
         contiguous_energies = np.ascontiguousarray(noncont_energies, dtype=np.float32)
         n_bins = contiguous_energies.shape[0]
-        self.energies_gpu = cuda.mem_alloc(n_bins * NUMBYTES_FLOAT32)
-        cuda.memcpy_htod(self.energies_gpu, contiguous_energies)
+        self.energies_gpu = cp.asarray(contiguous_energies)
         log.debug(f"bytes alloc'd for self.energies_gpu: {n_bins * NUMBYTES_FLOAT32}")
 
         # allocate and transfer spectrum pdf (4 bytes to a float32)
@@ -1198,8 +1071,7 @@ class Projector(object):
         contiguous_pdf = np.ascontiguousarray(noncont_pdf.copy(), dtype=np.float32)
         assert contiguous_pdf.shape == contiguous_energies.shape
         assert contiguous_pdf.shape[0] == n_bins
-        self.pdf_gpu = cuda.mem_alloc(n_bins * NUMBYTES_FLOAT32)
-        cuda.memcpy_htod(self.pdf_gpu, contiguous_pdf)
+        self.pdf_gpu = cp.asarray(contiguous_pdf)
         log.debug(f"bytes alloc'd for self.pdf_gpu {n_bins * NUMBYTES_FLOAT32}")
 
         # precompute, allocate, and transfer the get_absorption_coef(energy, material) table (4 bytes to a float32)
@@ -1213,10 +1085,7 @@ class Projector(object):
                 ] = mass_attenuation.get_absorption_coefs(
                     contiguous_energies[bin], mat_name
                 )
-        self.absorption_coef_table_gpu = cuda.mem_alloc(
-            n_bins * len(self.all_materials) * NUMBYTES_FLOAT32
-        )
-        cuda.memcpy_htod(self.absorption_coef_table_gpu, absorption_coef_table)
+        self.absorption_coef_table_gpu = cp.asarray(absorption_coef_table, dtype=cp.float32)
         log.debug(
             f"size alloc'd for self.absorption_coef_table_gpu: {n_bins * len(self.all_materials) * NUMBYTES_FLOAT32}"
         )
@@ -1333,51 +1202,32 @@ class Projector(object):
                 )
 
                 # allocate megavolume data and labeled (i.e., not binary) segmentation
-                self.megavol_density_gpu = cuda.mem_alloc(
-                    NUMBYTES_FLOAT32 * mega_x_len * mega_y_len * mega_z_len
-                )
-                self.megavol_labeled_seg_gpu = cuda.mem_alloc(
-                    NUMBYTES_INT8 * mega_x_len * mega_y_len * mega_z_len
-                )
+                self.megavol_density_gpu = cp.zeros(mega_x_len * mega_y_len * mega_z_len, dtype=cp.float32)
+                self.megavol_labeled_seg_gpu = cp.zeros(mega_x_len * mega_y_len * mega_z_len, dtype=cp.int8)
 
                 # TODO: discuss whether it is stylistically fine that these are allocated
                 # and freed entirely within the Projector.initialized function
-                inp_priority_gpu = cuda.mem_alloc(NUMBYTES_INT32 * len(self.volumes))
-                inp_voxelBoundX_gpu = cuda.mem_alloc(NUMBYTES_INT32 * len(self.volumes))
-                inp_voxelBoundY_gpu = cuda.mem_alloc(NUMBYTES_INT32 * len(self.volumes))
-                inp_voxelBoundZ_gpu = cuda.mem_alloc(NUMBYTES_INT32 * len(self.volumes))
-                inp_ijk_from_world_gpu = cuda.mem_alloc(
-                    NUMBYTES_INT32
-                    * np.array(self.volumes[0].ijk_from_world).size
-                    * len(self.volumes)
-                )
+                inp_priority_gpu = cp.zeros(len(self.volumes), dtype=cp.int32)
+                inp_voxelBoundX_gpu = cp.zeros(len(self.volumes), dtype=cp.int32)
+                inp_voxelBoundY_gpu = cp.zeros(len(self.volumes), dtype=cp.int32)
+                inp_voxelBoundZ_gpu = cp.zeros(len(self.volumes), dtype=cp.int32)
+                inp_ijk_from_world_gpu = cp.zeros(np.array(self.volumes[0].ijk_from_world).size * len(self.volumes), dtype=cp.int32)
 
                 for vol_id, _vol in enumerate(self.volumes):
-                    int_offset = NUMBYTES_INT32 * vol_id
+                    int_offset = vol_id
                     arr_offset = (
                         NUMBYTES_INT32 * np.array(_vol.ijk_from_world).size * vol_id
                     )
-                    cuda.memcpy_htod(
-                        int(inp_priority_gpu) + int_offset,
-                        np.int32(self.priorities[vol_id]),
-                    )
-                    cuda.memcpy_htod(
-                        int(inp_voxelBoundX_gpu) + int_offset, np.int32(_vol.shape[0])
-                    )
-                    cuda.memcpy_htod(
-                        int(inp_voxelBoundY_gpu) + int_offset, np.int32(_vol.shape[1])
-                    )
-                    cuda.memcpy_htod(
-                        int(inp_voxelBoundZ_gpu) + int_offset, np.int32(_vol.shape[2])
-                    )
+                    inp_priority_gpu[int_offset] = np.int32(self.priorities[vol_id])
+                    inp_voxelBoundX_gpu[int_offset] =  np.int32(_vol.shape[0])
+                    inp_voxelBoundY_gpu[int_offset] = np.int32(_vol.shape[1])
+                    inp_voxelBoundZ_gpu[int_offset] = np.int32(_vol.shape[2])
                     inp_ijk_from_world = np.ascontiguousarray(
                         np.array(_vol.ijk_from_world).astype(np.float32)
                     )
                     log.debug(inp_ijk_from_world)
                     # cuda.memcpy_htod(int(inp_ijk_from_world_gpu) + arr_offset, inp_ijk_from_world)
-                    cuda.memcpy_htod(
-                        int(inp_ijk_from_world_gpu) + arr_offset, np.int32(12345)
-                    )
+                    inp_ijk_from_world_gpu[arr_offset] = np.int32(12345)
 
                 # call the resampling kernel
                 # TODO: null segmentation should be assigned AIR material
@@ -1433,7 +1283,7 @@ class Projector(object):
                         offset_y,
                         offset_z,
                         block=block,
-                        grid=(blocks_x, blocks_y, blocks_z),
+                        grid=(blocks_x, blocks_y, blocks_z)
                     )
                 else:
                     log.debug("Running resampling kernel patchwise")
@@ -1450,20 +1300,24 @@ class Projector(object):
                                     offset_x,
                                     offset_y,
                                     offset_z,
+                                    self.volumes_texref,
+                                    self.segmentations_texref,
                                     block=block,
                                     grid=(
                                         self.max_block_index,
                                         self.max_block_index,
                                         self.max_block_index,
                                     ),
-                                )
-                                context.synchronize()
 
-                inp_priority_gpu.free()
-                inp_voxelBoundX_gpu.free()
-                inp_voxelBoundY_gpu.free()
-                inp_voxelBoundZ_gpu.free()
-                inp_ijk_from_world_gpu.free()
+                                )
+                                #TODO:required?
+                                #context.synchronize()
+
+                del inp_priority_gpu
+                del inp_voxelBoundX_gpu
+                del inp_voxelBoundY_gpu
+                del inp_voxelBoundZ_gpu
+                del inp_ijk_from_world_gpu
 
                 init_tock = time.perf_counter()
                 log.debug(
@@ -1484,10 +1338,8 @@ class Projector(object):
 
                 self.megavol_shape = (mega_x_len, mega_y_len, mega_z_len)
 
-                self.megavol_density_gpu = cuda.mem_alloc(NUMBYTES_FLOAT32 * num_voxels)
-                self.megavol_labeled_seg_gpu = cuda.mem_alloc(
-                    NUMBYTES_INT8 * num_voxels
-                )
+                self.megavol_density_gpu = cp.zeros(num_voxels, dtype=cp.float32)
+                self.megavol_labeled_seg_gpu = cp.zeros(num_voxels, dtype=cp.int8)
 
                 # TODO: null_seg should be assigned to AIR material.
                 # will need to figure out how to handle the case where
@@ -1508,11 +1360,11 @@ class Projector(object):
                     labeled_seg, len(self.all_materials) * null_seg
                 ).astype(np.int8)
                 # NOTE: axis swap not necessary because using raw array, not texture
-                cuda.memcpy_htod(self.megavol_labeled_seg_gpu, labeled_seg)
+                self.megavol_labeled_seg_gpu = labeled_seg
 
                 # Copy volume density info to self.megavol_density_gpu
                 # NOTE: axis swap not necessary because using raw array, not texture
-                cuda.memcpy_htod(self.megavol_density_gpu, self.volumes[0].data)
+                self.megavol_density_gpu = self.volumes[0].data
 
                 init_tock = time.perf_counter()
                 log.debug(
@@ -1520,110 +1372,113 @@ class Projector(object):
                 )
             # end initialization of megavolume
 
-            # Material MFP structs
-            self.mat_mfp_struct_dict = dict()
-            self.mat_mfp_structs_gpu = cuda.mem_alloc(
-                len(self.all_materials) * CudaMatMfpStruct.MEMSIZE
-            )
-            for i, mat in enumerate(self.all_materials):
-                struct_gpu_ptr = int(self.mat_mfp_structs_gpu) + (
-                    i * CudaMatMfpStruct.MEMSIZE
+
+            if 0:
+
+                # Material MFP structs
+                self.mat_mfp_struct_dict = dict()
+                self.mat_mfp_structs_gpu = cuda.mem_alloc(
+                    len(self.all_materials) * CudaMatMfpStruct.MEMSIZE
                 )
-                self.mat_mfp_struct_dict[mat] = CudaMatMfpStruct(
-                    MFP_DATA[mat], struct_gpu_ptr
+                for i, mat in enumerate(self.all_materials):
+                    struct_gpu_ptr = int(self.mat_mfp_structs_gpu) + (
+                        i * CudaMatMfpStruct.MEMSIZE
+                    )
+                    self.mat_mfp_struct_dict[mat] = CudaMatMfpStruct(
+                        MFP_DATA[mat], struct_gpu_ptr
+                    )
+
+                init_tock = time.perf_counter()
+                log.debug(
+                    f"time elapsed after intializing MFP structs: {init_tock - init_tick}"
+                )
+
+                # Woodcock MFP struct
+                wc_np_arr = scatter.make_woodcock_mfp(self.all_materials)
+                self.woodcock_struct_gpu = cuda.mem_alloc(CudaWoodcockStruct.MEMSIZE)
+                self.woodcock_struct = CudaWoodcockStruct(
+                    wc_np_arr, int(self.woodcock_struct_gpu)
+                )
+
+                init_tock = time.perf_counter()
+                log.debug(
+                    f"time elapsed after intializing Woodcock struct: {init_tock - init_tick}"
+                )
+
+                # Material Compton structs
+                self.compton_struct_dict = dict()
+                self.compton_structs_gpu = cuda.mem_alloc(
+                    len(self.all_materials) * CudaComptonStruct.MEMSIZE
+                )
+                for i, mat in enumerate(self.all_materials):
+                    struct_gpu_ptr = int(self.compton_structs_gpu) + (
+                        i * CudaComptonStruct.MEMSIZE
+                    )
+                    self.compton_struct_dict[mat] = CudaComptonStruct(
+                        COMPTON_DATA[mat], struct_gpu_ptr
+                    )
+
+                init_tock = time.perf_counter()
+                log.debug(
+                    f"time elapsed after intializing Compton structs: {init_tock - init_tick}"
+                )
+
+                # Material Rayleigh structs
+                self.rayleigh_struct_dict = dict()
+                self.rayleigh_structs_gpu = cuda.mem_alloc(
+                    len(self.all_materials) * CudaRayleighStruct.MEMSIZE
+                )
+                for i, mat in enumerate(self.all_materials):
+                    struct_gpu_ptr = int(self.rayleigh_structs_gpu) + (
+                        i * CudaRayleighStruct.MEMSIZE
+                    )
+                    self.rayleigh_struct_dict[mat] = CudaRayleighStruct(
+                        rita_samplers[mat], mat, struct_gpu_ptr
+                    )
+
+                init_tock = time.perf_counter()
+                log.debug(
+                    f"time elapsed after intializing RITA structs: {init_tock - init_tick}"
+                )
+
+                # Detector plane
+                self.detector_plane_gpu = cuda.mem_alloc(CudaPlaneSurfaceStruct.MEMSIZE)
+
+                # world_from_ijk
+                self.world_from_ijk_gpu = cuda.mem_alloc(3 * 4 * NUMBYTES_FLOAT32)
+
+                # index_from_world
+                # TODO: get the factor of "2 x 4" from a more abstract source
+                self.index_from_world_gpu = cuda.mem_alloc(
+                    2 * 4 * NUMBYTES_FLOAT32
+                )  # (2, 4) array of floats
+
+                # spectrum cdf
+                n_bins = self.spectrum.shape[0]
+                # spectrum_cdf = np.array([np.sum(self.spectrum[0:i+1, 1]) for i in range(n_bins)])
+                # spectrum_cdf = (spectrum_cdf / np.sum(self.spectrum[:, 1])).astype(np.float32)
+                spectrum_cdf = np.array(
+                    [np.sum(contiguous_pdf[0 : i + 1]) for i in range(n_bins)]
+                )
+                # log.debug(f"spectrum CDF:\n{spectrum_cdf}")
+                self.cdf_gpu = cuda.mem_alloc(n_bins * NUMBYTES_FLOAT32)
+                cuda.memcpy_htod(self.cdf_gpu, spectrum_cdf)
+
+                # output
+                self.scatter_deposits_gpu = cuda.mem_alloc(
+                    self.output_size * NUMBYTES_FLOAT32
+                )
+                self.num_scattered_hits_gpu = cuda.mem_alloc(
+                    self.output_size * NUMBYTES_INT32
+                )
+                self.num_unscattered_hits_gpu = cuda.mem_alloc(
+                    self.output_size * NUMBYTES_INT32
                 )
 
             init_tock = time.perf_counter()
             log.debug(
-                f"time elapsed after intializing MFP structs: {init_tock - init_tick}"
+                f"time elapsed after intializing rest of stuff: {init_tock - init_tick}"
             )
-
-            # Woodcock MFP struct
-            wc_np_arr = scatter.make_woodcock_mfp(self.all_materials)
-            self.woodcock_struct_gpu = cuda.mem_alloc(CudaWoodcockStruct.MEMSIZE)
-            self.woodcock_struct = CudaWoodcockStruct(
-                wc_np_arr, int(self.woodcock_struct_gpu)
-            )
-
-            init_tock = time.perf_counter()
-            log.debug(
-                f"time elapsed after intializing Woodcock struct: {init_tock - init_tick}"
-            )
-
-            # Material Compton structs
-            self.compton_struct_dict = dict()
-            self.compton_structs_gpu = cuda.mem_alloc(
-                len(self.all_materials) * CudaComptonStruct.MEMSIZE
-            )
-            for i, mat in enumerate(self.all_materials):
-                struct_gpu_ptr = int(self.compton_structs_gpu) + (
-                    i * CudaComptonStruct.MEMSIZE
-                )
-                self.compton_struct_dict[mat] = CudaComptonStruct(
-                    COMPTON_DATA[mat], struct_gpu_ptr
-                )
-
-            init_tock = time.perf_counter()
-            log.debug(
-                f"time elapsed after intializing Compton structs: {init_tock - init_tick}"
-            )
-
-            # Material Rayleigh structs
-            self.rayleigh_struct_dict = dict()
-            self.rayleigh_structs_gpu = cuda.mem_alloc(
-                len(self.all_materials) * CudaRayleighStruct.MEMSIZE
-            )
-            for i, mat in enumerate(self.all_materials):
-                struct_gpu_ptr = int(self.rayleigh_structs_gpu) + (
-                    i * CudaRayleighStruct.MEMSIZE
-                )
-                self.rayleigh_struct_dict[mat] = CudaRayleighStruct(
-                    rita_samplers[mat], mat, struct_gpu_ptr
-                )
-
-            init_tock = time.perf_counter()
-            log.debug(
-                f"time elapsed after intializing RITA structs: {init_tock - init_tick}"
-            )
-
-            # Detector plane
-            self.detector_plane_gpu = cuda.mem_alloc(CudaPlaneSurfaceStruct.MEMSIZE)
-
-            # world_from_ijk
-            self.world_from_ijk_gpu = cuda.mem_alloc(3 * 4 * NUMBYTES_FLOAT32)
-
-            # index_from_world
-            # TODO: get the factor of "2 x 4" from a more abstract source
-            self.index_from_world_gpu = cuda.mem_alloc(
-                2 * 4 * NUMBYTES_FLOAT32
-            )  # (2, 4) array of floats
-
-            # spectrum cdf
-            n_bins = self.spectrum.shape[0]
-            # spectrum_cdf = np.array([np.sum(self.spectrum[0:i+1, 1]) for i in range(n_bins)])
-            # spectrum_cdf = (spectrum_cdf / np.sum(self.spectrum[:, 1])).astype(np.float32)
-            spectrum_cdf = np.array(
-                [np.sum(contiguous_pdf[0 : i + 1]) for i in range(n_bins)]
-            )
-            # log.debug(f"spectrum CDF:\n{spectrum_cdf}")
-            self.cdf_gpu = cuda.mem_alloc(n_bins * NUMBYTES_FLOAT32)
-            cuda.memcpy_htod(self.cdf_gpu, spectrum_cdf)
-
-            # output
-            self.scatter_deposits_gpu = cuda.mem_alloc(
-                self.output_size * NUMBYTES_FLOAT32
-            )
-            self.num_scattered_hits_gpu = cuda.mem_alloc(
-                self.output_size * NUMBYTES_INT32
-            )
-            self.num_unscattered_hits_gpu = cuda.mem_alloc(
-                self.output_size * NUMBYTES_INT32
-            )
-
-        init_tock = time.perf_counter()
-        log.debug(
-            f"time elapsed after intializing rest of stuff: {init_tock - init_tick}"
-        )
 
         # Mark self as initialized.
         self.initialized = True
