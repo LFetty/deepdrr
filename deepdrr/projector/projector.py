@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-
+import sys
 import logging
 import time
 from pathlib import Path
@@ -143,7 +143,7 @@ def _get_kernel_projector_module(
     num_materials: int,
     air_index: int,
     attenuate_outside_volume: bool = False,
-) -> cp.RawModule:
+) -> cp.cuda.texture.RawModule:
     """Compile the cuda code for the kernel projector.
 
     Assumes `project_kernel.cu`, `kernel_vol_seg_data.cu`, and `cubic` interpolation library is in the same directory as THIS
@@ -178,18 +178,13 @@ def _get_kernel_projector_module(
         # )
 
     options += [
-        "-D",
-        f"NUM_VOLUMES={num_volumes}",
-        "-D",
-        f"NUM_MATERIALS={num_materials}",
-        "-D",
-        f"ATTENUATE_OUTSIDE_VOLUME={int(attenuate_outside_volume)}",
-        "-D",
-        f"AIR_INDEX={air_index}",
-        "-I",
-        bicubic_path,
-        "-I",
-        str(d)
+        f"-DNUM_VOLUMES={num_volumes}",
+        f"-DNUM_MATERIALS={num_materials}",
+        f"-DATTENUATE_OUTSIDE_VOLUME={int(attenuate_outside_volume)}",
+        f"-DAIR_INDEX={air_index}",
+        f"-I{bicubic_path}",
+        f"-I{str(d)}"
+        
     ]
     log.debug(
         f"compiling {source_path} with NUM_VOLUMES={num_volumes}, NUM_MATERIALS={num_materials}"
@@ -220,7 +215,7 @@ def _get_kernel_scatter_module(num_materials) -> SourceModule:
     return cp.RawModule(
         source,
         #no_extern_c=True,
-        options=["-D", f"NUM_MATERIALS={num_materials}", '-I', str(d)],
+        options=[f"-DNUM_MATERIALS={num_materials}", f'-I{str(d)}'],
         backend='nvcc'
     )
 
@@ -375,6 +370,7 @@ class Projector(object):
             attenuate_outside_volume=attenuate_outside_volume,
         )
         self.project_kernel = self.mod.get_function("projectKernel")
+        self.project_kernel.compile(log_stream=sys.stdout)
 
         if self.scatter_num > 0:
             self.scatter_mod = _get_kernel_scatter_module(len(self.all_materials))
@@ -491,7 +487,7 @@ class Projector(object):
 
             # Get the volume min/max points in world coordinates.
             sx, sy, sz = proj.get_center_in_world()
-            world_from_index = cp.asarray(proj.world_from_index[:-1, :], dtype=cp.float32)
+            world_from_index = cp.asarray(proj.world_from_index[:-1, :]).astype(cp.float32)
             self.world_from_index_gpu = world_from_index
 
             for vol_id, _vol in enumerate(self.volumes):
@@ -506,6 +502,8 @@ class Projector(object):
                 IJK_from_world = _vol.IJK_from_world.toarray()
                 self.ijk_from_world_gpu[IJK_from_world.size * vol_id:IJK_from_world.size * (vol_id+1)] = cp.asarray(IJK_from_world.flatten())
 
+            out = cp.zeros((3)).astype(cp.float32)
+            
             args = [
                 np.int32(proj.sensor_width),  # out_width
                 np.int32(proj.sensor_height),  # out_height
@@ -542,7 +540,8 @@ class Projector(object):
                 self.volumes_texref[0],
                 self.segmentations_texref[0],
                 self.segmentations_texref[1],
-                self.segmentations_texref[2]
+                self.segmentations_texref[2],
+                out
             ]
 
             # Calculate required blocks
@@ -582,14 +581,14 @@ class Projector(object):
             intensity = cp.asnumpy(self.intensity_gpu)
             # transpose the axes, which previously have width on the slow dimension
             log.debug("copied intensity from gpu")
-            intensity = np.swapaxes(intensity, 0, 1).copy()
+            intensity = np.swapaxes(intensity.reshape(proj.sensor_width, proj.sensor_height), 0, 1).copy()
             log.debug("swapped intensity")
 
             # photon_prob = np.zeros(self.output_shape, dtype=np.float32)
             # cuda.memcpy_dtoh(photon_prob, self.photon_prob_gpu)
             photon_prob = cp.asnumpy(self.photon_prob_gpu)
             log.debug("copied photon_prob")
-            photon_prob = np.swapaxes(photon_prob, 0, 1).copy()
+            photon_prob = np.swapaxes(photon_prob.reshape(proj.sensor_width, proj.sensor_height), 0, 1).copy()
             log.debug("swapped photon_prob")
 
             project_tock = time.perf_counter()
@@ -922,14 +921,14 @@ class Projector(object):
         )
 
         # allocate photon_prob array on GPU (4 bytes to a float32)
-        self.photon_prob_gpu = cp.zeros(self.output_size, dtype=cp.float32)
+        self.photon_prob_gpu = cp.zeros(self.output_size).astype(cp.float32)
         log.debug(
             f"bytes alloc'd for {self.output_shape} self.photon_prob_gpu: {self.output_size * NUMBYTES_FLOAT32}"
         )
 
         # allocate solid_angle array on GPU as needed (4 bytes to a float32)
         if self.collected_energy:
-            self.solid_angle_gpu = cp.zeros(self.output_size, dtype=cp.float32)
+            self.solid_angle_gpu = cp.zeros(self.output_size).astype(cp.float32)
             log.debug(
                 f"bytes alloc'd for {self.output_shape} self.solid_angle_gpu: {self.output_size * NUMBYTES_FLOAT32}"
             )
@@ -1035,40 +1034,40 @@ class Projector(object):
         )
 
         # allocate volumes' priority level on the GPU
-        self.priorities_gpu = cp.zeros(len(self.volumes), dtype=cp.int32)
+        self.priorities_gpu = cp.zeros(len(self.volumes)).astype(cp.int32)
         for vol_id, prio in enumerate(self.priorities):
             self.priorities_gpu[vol_id] = np.int32(prio)
 
         # allocate gVolumeEdge{Min,Max}Point{X,Y,Z} and gVoxelElementSize{X,Y,Z} on the GPU
-        self.minPointX_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.minPointY_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.minPointZ_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.maxPointX_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.maxPointY_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.maxPointZ_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.voxelSizeX_gpu =cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.voxelSizeY_gpu =cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.voxelSizeZ_gpu =cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.minPointX_gpu = cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.minPointY_gpu = cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.minPointZ_gpu = cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.maxPointX_gpu = cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.maxPointY_gpu = cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.maxPointZ_gpu = cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.voxelSizeX_gpu =cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.voxelSizeY_gpu =cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.voxelSizeZ_gpu =cp.zeros((len(self.volumes),)).astype(cp.float32)
 
         for i, _vol in enumerate(self.volumes):
             gpu_ptr_offset = NUMBYTES_FLOAT32 * i
-            self.minPointX_gpu = np.float32(-0.5)
-            self.minPointY_gpu = np.float32(-0.5)
-            self.minPointZ_gpu = np.float32(-0.5)
+            self.minPointX_gpu[i] = np.float32(-0.5)
+            self.minPointY_gpu[i] = np.float32(-0.5)
+            self.minPointZ_gpu[i] = np.float32(-0.5)
 
-            self.maxPointX_gpu = np.float32(_vol.shape[0] - 0.5)
-            self.maxPointY_gpu = np.float32(_vol.shape[1] - 0.5)
-            self.maxPointZ_gpu = np.float32(_vol.shape[2] - 0.5)
+            self.maxPointX_gpu[i] = np.float32(_vol.shape[0] - 0.5)
+            self.maxPointY_gpu[i] = np.float32(_vol.shape[1] - 0.5)
+            self.maxPointZ_gpu[i] = np.float32(_vol.shape[2] - 0.5)
             
-            self.voxelSizeX_gpu =np.float32(_vol.spacing[0])
-            self.voxelSizeY_gpu =np.float32(_vol.spacing[1])
-            self.voxelSizeZ_gpu =np.float32(_vol.spacing[2])
+            self.voxelSizeX_gpu[i] =np.float32(_vol.spacing[0])
+            self.voxelSizeY_gpu[i] =np.float32(_vol.spacing[1])
+            self.voxelSizeZ_gpu[i] =np.float32(_vol.spacing[2])
         log.debug(f"gVolume information allocated and copied to GPU")
 
         # allocate source coord.s on GPU (4 bytes for each of {x,y,z} for each volume)
-        self.sourceX_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.sourceY_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
-        self.sourceZ_gpu = cp.zeros(len(self.volumes), dtype=cp.float32)
+        self.sourceX_gpu = cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.sourceY_gpu = cp.zeros((len(self.volumes),)).astype(cp.float32)
+        self.sourceZ_gpu = cp.zeros((len(self.volumes),)).astype(cp.float32)
 
         init_tock = time.perf_counter()
         log.debug(
@@ -1076,10 +1075,10 @@ class Projector(object):
         )
 
         # allocate world_from_index matrix array on GPU (3x3 array x 4 bytes per float32)
-        self.world_from_index_gpu = cp.zeros(3 * 3, dtype=cp.float32)
+        self.world_from_index_gpu = cp.zeros(3 * 3).astype(cp.float32)
 
         # allocate ijk_from_world for each volume.
-        self.ijk_from_world_gpu = cp.zeros(len(self.volumes) * 3 * 4, dtype=cp.float32)
+        self.ijk_from_world_gpu = cp.zeros(len(self.volumes) * 3 * 4).astype(cp.float32)
 
         # Initializes the output_shape as well.
         self.initialize_output_arrays(self.camera_intrinsics.sensor_size)
@@ -1111,7 +1110,7 @@ class Projector(object):
                 ] = mass_attenuation.get_absorption_coefs(
                     contiguous_energies[bin], mat_name
                 )
-        self.absorption_coef_table_gpu = cp.asarray(absorption_coef_table, dtype=cp.float32)
+        self.absorption_coef_table_gpu = cp.asarray(absorption_coef_table).astype(cp.float32)
         log.debug(
             f"size alloc'd for self.absorption_coef_table_gpu: {n_bins * len(self.all_materials) * NUMBYTES_FLOAT32}"
         )
@@ -1228,7 +1227,7 @@ class Projector(object):
                 )
 
                 # allocate megavolume data and labeled (i.e., not binary) segmentation
-                self.megavol_density_gpu = cp.zeros(mega_x_len * mega_y_len * mega_z_len, dtype=cp.float32)
+                self.megavol_density_gpu = cp.zeros(mega_x_len * mega_y_len * mega_z_len).astype(cp.float32)
                 self.megavol_labeled_seg_gpu = cp.zeros(mega_x_len * mega_y_len * mega_z_len, dtype=cp.int8)
 
                 # TODO: discuss whether it is stylistically fine that these are allocated
@@ -1364,7 +1363,7 @@ class Projector(object):
 
                 self.megavol_shape = (mega_x_len, mega_y_len, mega_z_len)
 
-                self.megavol_density_gpu = cp.zeros(num_voxels, dtype=cp.float32)
+                self.megavol_density_gpu = cp.zeros(num_voxels).astype(cp.float32)
                 self.megavol_labeled_seg_gpu = cp.zeros(num_voxels, dtype=cp.int8)
 
                 # TODO: null_seg should be assigned to AIR material.

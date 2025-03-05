@@ -338,10 +338,11 @@ __global__ void projectKernel(
     cudaTextureObject_t volume_tex_0, //cudaTextureObject_t
     cudaTextureObject_t  seg_tex_0,
     cudaTextureObject_t  seg_tex_1,
-    cudaTextureObject_t  seg_tex_2
+    cudaTextureObject_t  seg_tex_2,
+    float *out
   ) {
-    cudaTextureObject_t volume_tex[] = {volume_tex_0};
-    cudaTextureObject_t seg_tex[] = {seg_tex_0, seg_tex_1, seg_tex_2};
+    cudaTextureObject_t volume_tex[1] = {volume_tex_0};
+    cudaTextureObject_t seg_tex[3] = {seg_tex_0, seg_tex_1, seg_tex_2};
   // The output image has the following coordinate system, with cell-centered
   // sampling. y is along the fast axis (columns), x along the slow (rows).
   //
@@ -374,8 +375,8 @@ __global__ void projectKernel(
   int img_dx = (udx * out_height) + vdx;
 
   // initialize intensity and photon_prob to 0
-  intensity[img_dx] = 0;
-  photon_prob[img_dx] = 0;
+  intensity[img_dx] = 0.0f;
+  photon_prob[img_dx] = 0.0f;
 
   if (NULL != solid_angle) {
     calculate_solid_angle(world_from_index, solid_angle, udx, vdx, img_dx);
@@ -440,10 +441,14 @@ __global__ void projectKernel(
     do_trace[i] = 1;
     minAlpha_vol[i] = 0;
     maxAlpha_vol[i] = max_ray_length > 0 ? max_ray_length : INFINITY;
+
     if (0.0f != rx_ijk[i]) {
       reci = 1.0f / rx_ijk[i];
       alpha0 = (gVolumeEdgeMinPointX[i] - sx_ijk[i]) * reci;
       alpha1 = (gVolumeEdgeMaxPointX[i] - sx_ijk[i]) * reci;
+
+
+
       minAlpha_vol[i] = fmax(minAlpha_vol[i], fmin(alpha0, alpha1));
       maxAlpha_vol[i] = fmin(maxAlpha_vol[i], fmax(alpha0, alpha1));
     } else if (gVolumeEdgeMinPointX[i] > sx_ijk[i] ||
@@ -498,6 +503,11 @@ __global__ void projectKernel(
     area_density[m] = 0.0f;
   }
 
+
+  float area_density2[NUM_MATERIALS];
+  for (int m = 0; m < NUM_MATERIALS; m++) {
+    area_density2[m] = 0.0f;
+  }
   float px[NUM_VOLUMES]; // voxel-space point
   float py[NUM_VOLUMES];
   float pz[NUM_VOLUMES];
@@ -512,47 +522,50 @@ __global__ void projectKernel(
   if (ATTENUATE_OUTSIDE_VOLUME) {
     area_density[AIR_INDEX] += (minAlpha / step) * AIR_DENSITY;
   }
-  
+
   // trace (if doing the last segment separately, need to use num_steps - 1
   for (int t = 0; t < num_steps; t++) {
     
-    do { 
+    //printf("test");
+     
+    // do { 
       
-      if (do_trace[0]) { 
-        do { 
-          px[0] = sx_ijk[0] + alpha * rx_ijk[0] - 0.5; 
-          py[0] = sy_ijk[0] + alpha * ry_ijk[0] - 0.5; 
-          pz[0] = sz_ijk[0] + alpha * rz_ijk[0] - 0.5; } 
-          while (0); 
+    //   if (do_trace[0]) { 
+    //     do { 
+    //       px[0] = sx_ijk[0] + alpha * rx_ijk[0] - 0.5; 
+    //       py[0] = sy_ijk[0] + alpha * ry_ijk[0] - 0.5; 
+    //       pz[0] = sz_ijk[0] + alpha * rz_ijk[0] - 0.5; } 
+    //       while (0); 
           
-        do { 
-          do { 
-            float value = round( cubicTex3D(seg_tex[0 * 3 + 0], make_float3(px[0], py[0], pz[0]))); 
-            seg_at_alpha[0][0] = value; 
-            printf("%f", value); } 
-            while (0);
-            return; 
-          do { 
-            float value = round( cubicTex3D<float, float>(seg_tex[0 * 3 + 1], make_float3(px[0], py[0], pz[0]))); 
-            seg_at_alpha[0][1] = value; 
-            printf("%f", value); } 
-            while (0);
-          do { 
-            float value = round( cubicTex3D<float, float>(seg_tex[0 * 3 + 2], make_float3(px[0], py[0], pz[0]))); 
-            seg_at_alpha[0][2] = value; 
-            printf("%f", value); } 
-            while (0); } 
-          while (0); 
-        } 
-      } 
-      while (0);
-
-    //LOAD_SEGS_AT_ALPHA; // initializes p{x,y,z}[...] and
+    //     do { 
+    //       do { 
+            
+    //         float value = round( cubicTex3D(seg_tex[0 * 3 + 0], make_float3(px[0], py[0], pz[0]))); 
+    //         seg_at_alpha[0][0] = value;
+    //         } 
+    //         while (0);
+            
+    //       do { 
+    //         float value = round( cubicTex3D(seg_tex[0 * 3 + 1], make_float3(px[0], py[0], pz[0]))); 
+    //         seg_at_alpha[0][1] = value; 
+    //         } 
+    //         while (0);
+    //       do { 
+    //         float value = round( cubicTex3D(seg_tex[0 * 3 + 2], make_float3(px[0], py[0], pz[0]))); 
+    //         seg_at_alpha[0][2] = value; 
+    //         } 
+    //         while (0); } 
+    //       while (0); 
+    //     } 
+    //   } 
+    //   while (0); 
+        
+    LOAD_SEGS_AT_ALPHA; // initializes p{x,y,z}[...] and
                         // seg_at_alpha[...][...]
     // if (debug) printf("  loaded segs\n"); // This is the one that seems to
     // take a half a second.
     //
-    return;
+
     curr_priority = NUM_VOLUMES;
     n_vols_at_curr_priority = 0;
     for (int i = 0; i < NUM_VOLUMES; i++) {
@@ -581,6 +594,8 @@ __global__ void projectKernel(
       }
     }
 
+ 
+
     // if (debug) printf("  got priority at alpha, num vols\n"); // This is
     // the one that seems to take a half a second.
     if (0 == n_vols_at_curr_priority) {
@@ -599,14 +614,33 @@ __global__ void projectKernel(
       // globalMaxAlpha boundary.
       weight *= (0 == t || num_steps - 1 == t) ? 0.5f : 1.0f;
 
-      INTERPOLATE(weight);
+      do { 
+        if (do_trace[0] && (priority[0] == curr_priority)) { 
+          do { 
+            do { 
+              area_density[(0)] += (weight)*tex3D<float>(volume_tex[0], px[0], py[0], pz[0]) * seg_at_alpha[0][0]; } 
+            while (0); 
+            do { 
+              area_density[(1)] += (weight)*tex3D<float>(volume_tex[0], px[0], py[0], pz[0]) * seg_at_alpha[0][1]; } 
+            while (0); 
+            do { 
+              area_density[(2)] += (weight)*tex3D<float>(volume_tex[0], px[0], py[0], pz[0]) * seg_at_alpha[0][2]; } 
+              while (0); 
+            }
+            while (0);
+          } 
+        } while (0);
+      // INTERPOLATE(weight);
+      
+      // for (int m = 0; m < NUM_MATERIALS; m++) {
+      //   out[m] = area_density[m];
+      // }
+      
 
     }
     alpha += step;
   }
-
-
-  return;
+  
   // Attenuate from the end of the volume to the detector.
   if (ATTENUATE_OUTSIDE_VOLUME) {
     area_density[AIR_INDEX] += (ray_length - maxAlpha) / step * AIR_DENSITY;
@@ -704,14 +738,14 @@ __global__ void projectKernel(
 #define RESAMPLE_TEXTURES(vol_id)                                              \
   do {                                                                         \
     density_sample[vol_id] = tex3D<float>(VOL_TEX(vol_id),inp_x, inp_y, inp_z);       \
-    mat_sample[vol_id][0] = cubicTex3D<float, float>(SEG_TEX(vol_id,0), make_float3(inp_x, inp_y, inp_z));   \
+    mat_sample[vol_id][0] = cubicTex3D(SEG_TEX(vol_id,0), make_float3(inp_x, inp_y, inp_z));   \
   } while (0)
 #elif NUM_MATERIALS == 2
 #define RESAMPLE_TEXTURES(vol_id)                                              \
   do {                                                                         \
     density_sample[vol_id] = tex3D<float>(VOL_TEX(vol_id), inp_x, inp_y, inp_z);       \
-    mat_sample[vol_id][0] = cubicTex3D<float, float>(SEG_TEX(vol_id,0), make_float3(inp_x, inp_y, inp_z));   \
-    mat_sample[vol_id][1] = cubicTex3D<float, float>(SEG_TEX(vol_id,1), make_float3(inp_x, inp_y, inp_z));   \
+    mat_sample[vol_id][0] = cubicTex3D(SEG_TEX(vol_id,0), make_float3(inp_x, inp_y, inp_z));   \
+    mat_sample[vol_id][1] = cubicTex3D(SEG_TEX(vol_id,1), make_float3(inp_x, inp_y, inp_z));   \
   } while (0)
 #elif NUM_MATERIALS == 3
 #define RESAMPLE_TEXTURES(vol_id)                                              \
