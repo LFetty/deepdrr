@@ -74,14 +74,35 @@ def _get_texture(array:np.ndarray) -> cp.cuda.TextureObject:
         cupy.cuda.TextureObject: The texture object.
     """
     # Create 3D CUDA array for segmentation
-    tex_desc = cp.cuda.texture.TextureDescriptor(addressModes=(runtime.cudaAddressModeClamp, runtime.cudaAddressModeClamp, runtime.cudaAddressModeClamp),
+    tex_desc = cp.cuda.texture.TextureDescriptor(addressModes=(runtime.cudaAddressModeClamp, 
+                                                               runtime.cudaAddressModeClamp, 
+                                                               runtime.cudaAddressModeClamp),
                                          filterMode=runtime.cudaFilterModeLinear,
                                          readMode=runtime.cudaReadModeElementType, 
                                          borderColors=None, 
                                          normalizedCoords=False)
+    
+    channelformat_desc = cp.cuda.texture.ChannelFormatDescriptor(x=32, 
+                                                                 y=0, 
+                                                                 z=0, 
+                                                                 w=0,
+                                                                 f=runtime.cudaChannelFormatKindFloat)
+    
+    
+    arr=cp.asarray(np.moveaxis(array, [0, 1, 2], [2, 1, 0]).copy(), order='C')
+    width, height, depth = arr.shape
+    
+    cuda_array = cp.cuda.texture.CUDAarray(desc=channelformat_desc, 
+                                           width=depth,#width, 
+                                           height=height, 
+                                           depth=width,#depth, 
+                                           flags=0)
+    
+    cuda_array.copy_from(arr)
+    
     resource_desc = cp.cuda.texture.ResourceDescriptor(restype=runtime.cudaResourceTypeArray, 
-                                                       #CUDAarray cuArr=None, 
-                                                       arr=cp.asarray(np.moveaxis(array, [0, 1, 2], [2, 1, 0]).copy(), order='C'), 
+                                                       cuArr=cuda_array, 
+                                                       #arr=cuda_array, 
                                                        #ChannelFormatDescriptor chDesc=None, 
                                                        #size_t sizeInBytes=0, 
                                                        #size_t width=0, 
@@ -89,7 +110,7 @@ def _get_texture(array:np.ndarray) -> cp.cuda.TextureObject:
                                                        )
                     
                     # Create texture object  
-    texture = cp.cuda.texture.TextureObject(resource_desc, tex_desc)
+    texture = cp.cuda.texture.TextureObject(ResDesc=resource_desc, TexDesc=tex_desc)
     return texture
     
 
@@ -122,7 +143,7 @@ def _get_kernel_projector_module(
     num_materials: int,
     air_index: int,
     attenuate_outside_volume: bool = False,
-) -> SourceModule:
+) -> cp.RawModule:
     """Compile the cuda code for the kernel projector.
 
     Assumes `project_kernel.cu`, `kernel_vol_seg_data.cu`, and `cubic` interpolation library is in the same directory as THIS
@@ -165,15 +186,19 @@ def _get_kernel_projector_module(
         f"ATTENUATE_OUTSIDE_VOLUME={int(attenuate_outside_volume)}",
         "-D",
         f"AIR_INDEX={air_index}",
+        "-I",
+        bicubic_path,
+        "-I",
+        str(d)
     ]
     log.debug(
         f"compiling {source_path} with NUM_VOLUMES={num_volumes}, NUM_MATERIALS={num_materials}"
     )
-    return SourceModule(
-        source,
-        include_dirs=[bicubic_path, str(d)],
-        options=options,
-        no_extern_c=True,
+    return cp.RawModule(
+        code=source,
+        #include_dirs=[bicubic_path, str(d)],
+        options=tuple(options),
+        backend='nvcc'
     )
 
 
@@ -192,11 +217,11 @@ def _get_kernel_scatter_module(num_materials) -> SourceModule:
         source = file.read()
 
     log.debug(f"compiling {source_path} with NUM_MATERIALS={num_materials}")
-    return SourceModule(
+    return cp.RawModule(
         source,
-        include_dirs=[str(d)],
-        no_extern_c=True,
-        options=["-D", f"NUM_MATERIALS={num_materials}"],
+        #no_extern_c=True,
+        options=["-D", f"NUM_MATERIALS={num_materials}", '-I', str(d)],
+        backend='nvcc'
     )
 
 
@@ -466,9 +491,7 @@ class Projector(object):
 
             # Get the volume min/max points in world coordinates.
             sx, sy, sz = proj.get_center_in_world()
-            world_from_index = np.array(proj.world_from_index[:-1, :]).astype(
-                np.float32
-            )
+            world_from_index = cp.asarray(proj.world_from_index[:-1, :], dtype=cp.float32)
             self.world_from_index_gpu = world_from_index
 
             for vol_id, _vol in enumerate(self.volumes):
@@ -481,7 +504,7 @@ class Projector(object):
 
                 # TODO: prefer toarray() to get transform throughout
                 IJK_from_world = _vol.IJK_from_world.toarray()
-                self.ijk_from_world_gpu[IJK_from_world.size * vol_id] = IJK_from_world
+                self.ijk_from_world_gpu[IJK_from_world.size * vol_id:IJK_from_world.size * (vol_id+1)] = cp.asarray(IJK_from_world.flatten())
 
             args = [
                 np.int32(proj.sensor_width),  # out_width
@@ -504,6 +527,7 @@ class Projector(object):
                 self.sourceY_gpu,  # sy_ijk
                 self.sourceZ_gpu,  # sz_ijk
                 np.float32(max_ray_length),  # max_ray_length
+                
                 self.world_from_index_gpu,  # world_from_index
                 self.ijk_from_world_gpu,  # ijk_from_world
                 np.int32(self.spectrum.shape[0]),  # n_bins
@@ -513,6 +537,12 @@ class Projector(object):
                 self.intensity_gpu,  # intensity
                 self.photon_prob_gpu,  # photon_prob
                 self.solid_angle_gpu,  # solid_angle
+                np.int32(0),
+                np.int32(0),
+                self.volumes_texref[0],
+                self.segmentations_texref[0],
+                self.segmentations_texref[1],
+                self.segmentations_texref[2]
             ]
 
             # Calculate required blocks
@@ -527,25 +557,17 @@ class Projector(object):
             # log.info(f"offset_w: {offset_w}, offset_h: {offset_h}")
             # log.info(f"block: {block}, grid: {(blocks_w, blocks_h)}")
             if blocks_w <= self.max_block_index and blocks_h <= self.max_block_index:
-                offset_w = np.int32(0)
-                offset_h = np.int32(0)
-                self.project_kernel(
-                    *args, offset_w, offset_h, self.volumes_texref, self.segmentations_texref, block=block, grid=(blocks_w, blocks_h)
-                )
+                self.project_kernel(block=block, grid=(blocks_w, blocks_h, 1), args=tuple(args))
             else:
                 log.debug("Running kernel patchwise")
                 for w in range((blocks_w - 1) // (self.max_block_index + 1)):
                     for h in range((blocks_h - 1) // (self.max_block_index + 1)):
-                        offset_w = np.int32(w * self.max_block_index)
-                        offset_h = np.int32(h * self.max_block_index)
+                        args[-4] = np.int32(w * self.max_block_index)
+                        args[-3] = np.int32(h * self.max_block_index)
                         self.project_kernel(
-                            *args,
-                            offset_w,
-                            offset_h,
-                            self.volumes_texref, 
-                            self.segmentations_texref,
-                            block=block,
-                            grid=(self.max_block_index, self.max_block_index),
+                            block,
+                            (self.max_block_index, self.max_block_index),
+                            args
                         )
                         #TODO:required?
                         #context.synchronize()
@@ -885,29 +907,29 @@ class Projector(object):
             return
 
         if self.initialized:
-            self.intensity_gpu.free()
-            self.photon_prob_gpu.free()
+            del self.intensity_gpu
+            del self.photon_prob_gpu
             if self.collected_energy:
-                self.solid_angle_gpu.free()
+                del self.solid_angle_gpu
 
         # Changes the output size as well
         self.output_shape = sensor_size
 
         # allocate intensity array on GPU (4 bytes to a float32)
-        self.intensity_gpu = cuda.mem_alloc(self.output_size * NUMBYTES_FLOAT32)
+        self.intensity_gpu = cp.zeros(self.output_size, cp.float32)
         log.debug(
             f"bytes alloc'd for {self.output_shape} self.intensity_gpu: {self.output_size * NUMBYTES_FLOAT32}"
         )
 
         # allocate photon_prob array on GPU (4 bytes to a float32)
-        self.photon_prob_gpu = cuda.mem_alloc(self.output_size * NUMBYTES_FLOAT32)
+        self.photon_prob_gpu = cp.zeros(self.output_size, dtype=cp.float32)
         log.debug(
             f"bytes alloc'd for {self.output_shape} self.photon_prob_gpu: {self.output_size * NUMBYTES_FLOAT32}"
         )
 
         # allocate solid_angle array on GPU as needed (4 bytes to a float32)
         if self.collected_energy:
-            self.solid_angle_gpu = cuda.mem_alloc(self.output_size * NUMBYTES_FLOAT32)
+            self.solid_angle_gpu = cp.zeros(self.output_size, dtype=cp.float32)
             log.debug(
                 f"bytes alloc'd for {self.output_shape} self.solid_angle_gpu: {self.output_size * NUMBYTES_FLOAT32}"
             )
@@ -951,33 +973,37 @@ class Projector(object):
     def init_textures_for_ct(self):
         # Create CUDA arrays and texture objects
         volume_textures = []
+        volume_textures_ptr = []
 
         for vol in self.volumes:
             # For volume data
             vol_data = np.array(vol)
             texture = _get_texture(vol_data)
             volume_textures.append(texture)
+            volume_textures_ptr.append(texture.ptr)
             
-        return volume_textures
+        return volume_textures, cp.array(volume_textures_ptr, dtype=cp.uint64)
 
 
     def init_textures_for_seg(self):
         # Create CUDA arrays and texture objects
 
         seg_textures = []
+        seg_textures_ptr = []
        
         for vol_id, _vol in enumerate(self.volumes):
             for mat_id, mat in enumerate(self.all_materials):
                 seg = None
                 if mat in _vol.materials:
-                    seg = _vol.materials[mat]
+                    seg = _vol.materials[mat].astype(np.float32)
                 else:
                     seg = np.zeros(_vol.shape).astype(np.float32)
                 
                 texture = _get_texture(seg)
-                seg_textures.extend(texture)
+                seg_textures.append(texture)
+                seg_textures_ptr.append(texture.ptr)
         
-        return seg_textures
+        return seg_textures, cp.array(seg_textures_ptr, dtype=cp.uint64)
 
 
     def initialize(self):
@@ -993,13 +1019,13 @@ class Projector(object):
 
         # allocate and transfer the volume texture to GPU
         
-        self.volumes_texref = self.init_textures_for_ct()
+        self.volumes_texref, self.volumes_texref_ptr = self.init_textures_for_ct()
 
         init_tock = time.perf_counter()
         log.debug(f"time elapsed after intializing volumes: {init_tock - init_tick}")
 
         # List[List[segmentations]], indexing by (vol_id, material_id)
-        self.segmentations_texref = self.init_textures_for_seg()
+        self.segmentations_texref, self.segmentations_texref_ptr = self.init_textures_for_seg()
         # List[List[texrefs]], indexing by (vol_id, material_id)
 
 
@@ -1486,54 +1512,54 @@ class Projector(object):
     def free(self):
         """Free the allocated GPU memory."""
         if self.initialized:
-            for vol_id, vol_gpu in enumerate(self.volumes_gpu):
-                vol_gpu.free()
-                for seg in self.segmentations_gpu[vol_id]:
-                    seg.free()
+            for vol_id, vol_gpu in enumerate(self.volumes_texref):
+                del vol_gpu
+            for seg in self.segmentations_texref:
+                del seg
 
-            self.priorities_gpu.free()
+            del self.priorities_gpu
 
-            self.minPointX_gpu.free()
-            self.minPointY_gpu.free()
-            self.minPointZ_gpu.free()
+            del self.minPointX_gpu
+            del self.minPointY_gpu
+            del self.minPointZ_gpu
 
-            self.maxPointX_gpu.free()
-            self.maxPointY_gpu.free()
-            self.maxPointZ_gpu.free()
+            del self.maxPointX_gpu
+            del self.maxPointY_gpu
+            del self.maxPointZ_gpu
 
-            self.voxelSizeX_gpu.free()
-            self.voxelSizeY_gpu.free()
-            self.voxelSizeZ_gpu.free()
+            del self.voxelSizeX_gpu
+            del self.voxelSizeY_gpu
+            del self.voxelSizeZ_gpu
 
-            self.sourceX_gpu.free()
-            self.sourceY_gpu.free()
-            self.sourceZ_gpu.free()
+            del self.sourceX_gpu
+            del self.sourceY_gpu
+            del self.sourceZ_gpu
 
-            self.world_from_index_gpu.free()
-            self.ijk_from_world_gpu.free()
-            self.intensity_gpu.free()
-            self.photon_prob_gpu.free()
+            del self.world_from_index_gpu
+            del self.ijk_from_world_gpu
+            del self.intensity_gpu
+            del self.photon_prob_gpu
 
             if self.collected_energy:
-                self.solid_angle_gpu.free()
+                del self.solid_angle_gpu
 
-            self.energies_gpu.free()
-            self.pdf_gpu.free()
-            self.absorption_coef_table_gpu.free()
+            del self.energies_gpu
+            del self.pdf_gpu
+            del self.absorption_coef_table_gpu
 
             if self.scatter_num > 0:
-                self.megavol_density_gpu.free()
-                self.megavol_labeled_seg_gpu.free()
-                self.mat_mfp_structs_gpu.free()
-                self.woodcock_struct_gpu.free()
-                self.compton_structs_gpu.free()
-                self.rayleigh_structs_gpu.free()
-                self.detector_plane_gpu.free()
-                self.index_from_world_gpu.free()
-                self.cdf_gpu.free()
-                self.scatter_deposits_gpu.free()
-                self.num_scattered_hits_gpu.free()
-                self.num_unscattered_hits_gpu.free()
+                del self.megavol_density_gpu
+                del self.megavol_labeled_seg_gpu
+                del self.mat_mfp_structs_gpu
+                del self.woodcock_struct_gpu
+                del self.compton_structs_gpu
+                del self.rayleigh_structs_gpu
+                del self.detector_plane_gpu
+                del self.index_from_world_gpu
+                del self.cdf_gpu
+                del self.scatter_deposits_gpu
+                del self.num_scattered_hits_gpu
+                del self.num_unscattered_hits_gpu
 
         self.initialized = False
 
