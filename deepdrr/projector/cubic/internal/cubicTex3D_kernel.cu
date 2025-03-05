@@ -59,7 +59,7 @@ __device__ floatN CUBICTEX3D(cudaTextureObject_t tex, float3 coord)
 	const float3 g1 = w2 + w3;
 	const float3 h0 = (w1 / g0) - 0.5f + index;  //h0 = w1/g0 - 1, move from [-0.5, extent-0.5] to [0, extent]
 	const float3 h1 = (w3 / g1) + 1.5f + index;  //h1 = w3/g1 + 1, move from [-0.5, extent-0.5] to [0, extent]
-
+	return;
 	// fetch the eight linear interpolations
 	// weighting and fetching is interleaved for performance and stability reasons
 	floatN tex000 = tex3D<T>(tex, h0.x, h0.y, h0.z);

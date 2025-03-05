@@ -9,9 +9,13 @@
 #define VOLUME(vol_id) VOL_PASTER(vol_id)
 
 #define SEG_TEX(vol_id, mat_id) seg_tex[vol_id * NUM_MATERIALS + mat_id]
+#define VOL_TEX(vol_id) volume_tex[vol_id]
+
+// __device__ cudaTextureObject_t volume_tex;
+// __device__ cudaTextureObject_t seg_tex;
 
 #ifndef NUM_MATERIALS
-#define NUM_MATERIALS 14
+#define NUM_MATERIALS 3//14
 #endif
 
 #ifndef NUM_VOLUMES
@@ -31,28 +35,28 @@
 #endif
 
 /*** Handle one volume ***/
-#if NUM_VOLUMES > 0
-#define CURR_VOL_ID 0
-// the CT volume
-texture<float, 3, cudaReadModeElementType> VOLUME(CURR_VOL_ID);
+// #if NUM_VOLUMES > 0
+// #define CURR_VOL_ID 0
+// // the CT volume
+// texture<float, 3, cudaReadModeElementType> VOLUME(CURR_VOL_ID);
 
-// channel of the materials array, same size as the volume.
-#if NUM_MATERIALS > 0
-texture<float, 3, cudaReadModeElementType> SEG(CURR_VOL_ID, 0);
-#endif
-#if NUM_MATERIALS > 1
-texture<float, 3, cudaReadModeElementType> SEG(CURR_VOL_ID, 1);
-#endif
-#if NUM_MATERIALS > 1
-texture<float, 3, cudaReadModeElementType> SEG(CURR_VOL_ID, 2);
-#endif
+// // channel of the materials array, same size as the volume.
+// #if NUM_MATERIALS > 0
+// texture<float, 3, cudaReadModeElementType> SEG(CURR_VOL_ID, 0);
+// #endif
+// #if NUM_MATERIALS > 1
+// texture<float, 3, cudaReadModeElementType> SEG(CURR_VOL_ID, 1);
+// #endif
+// #if NUM_MATERIALS > 1
+// texture<float, 3, cudaReadModeElementType> SEG(CURR_VOL_ID, 2);
+// #endif
 
-#undef CURR_VOL_ID
-#endif
+// #undef CURR_VOL_ID
+// #endif
 
 #define UPDATE(multiplier, vol_id, mat_id)                                     \
   do {                                                                         \
-    area_density[(mat_id)] += (multiplier)*tex3D<float>(volume_tex[vol_id], px[vol_id],   \
+    area_density[(mat_id)] += (multiplier)*tex3D<float>(VOL_TEX(vol_id), px[vol_id],   \
                                                  py[vol_id], pz[vol_id]) *     \
                               seg_at_alpha[vol_id][mat_id];                    \
   } while (0)
@@ -70,7 +74,7 @@ texture<float, 3, cudaReadModeElementType> SEG(CURR_VOL_ID, 2);
 #define LOAG_SEGS_FOR_VOL_MAT(vol_id, mat_id)                                  \
   do {                                                                         \
     seg_at_alpha[vol_id][mat_id] = round(                                      \
-        cubicTex3D<float, float>(SEG_TEX(vol_id, mat_id), make_float3(px[vol_id], py[vol_id], pz[vol_id])));  \
+        cubicTex3D<float, float>(SEG_TEX(vol_id, mat_id), make_float3(px[vol_id], py[vol_id], pz[vol_id])));  \  
   } while (0)
 
 // TODO: rather than having num vols lines for each macro, define the macro once
@@ -295,11 +299,14 @@ __global__ void projectKernel(
                     // when determining which volume we are in
     float *gVolumeEdgeMinPointX, // These give a bounding box in world-space
                                  // around each volume.
-    float *gVolumeEdgeMinPointY, float *gVolumeEdgeMinPointZ,
-    float *gVolumeEdgeMaxPointX, float *gVolumeEdgeMaxPointY,
+    float *gVolumeEdgeMinPointY, 
+    float *gVolumeEdgeMinPointZ,
+    float *gVolumeEdgeMaxPointX, 
+    float *gVolumeEdgeMaxPointY,
     float *gVolumeEdgeMaxPointZ,
     float *gVoxelElementSizeX, // one value for each of the NUM_VOLUMES volumes
-    float *gVoxelElementSizeY, float *gVoxelElementSizeZ,
+    float *gVoxelElementSizeY, 
+    float *gVoxelElementSizeZ,
     float sx,      // x-coordinate of source point for rays in world-space
     float sy,      // y-coordinate of source point for rays in world-space
     float sz,      // z-coordinate of source point for rays in world-space
@@ -326,9 +333,15 @@ __global__ void projectKernel(
     float *photon_prob,       // flat array, with shape (out_height, out_width).
     float *solid_angle,       // flat array, with shape (out_height, out_width).
                               // Could be NULL pointer
-    int offsetW, int offsetH,
-    cudaTextureObject_t volume_tex[NUM_VOLUMES],
-    cudaTextureObject_t seg_tex[NUM_VOLUMES*NUM_MATERIALS]) {
+    int offsetW, 
+    int offsetH,
+    cudaTextureObject_t volume_tex_0, //cudaTextureObject_t
+    cudaTextureObject_t  seg_tex_0,
+    cudaTextureObject_t  seg_tex_1,
+    cudaTextureObject_t  seg_tex_2
+  ) {
+    cudaTextureObject_t volume_tex[] = {volume_tex_0};
+    cudaTextureObject_t seg_tex[] = {seg_tex_0, seg_tex_1, seg_tex_2};
   // The output image has the following coordinate system, with cell-centered
   // sampling. y is along the fast axis (columns), x along the slow (rows).
   //
@@ -342,6 +355,7 @@ __global__ void projectKernel(
   //      *---------------------------*
   //
   //
+
   int udx = threadIdx.x + (blockIdx.x + offsetW) *
                               blockDim.x; // index into output image width
   int vdx = threadIdx.y + (blockIdx.y + offsetH) *
@@ -354,7 +368,7 @@ __global__ void projectKernel(
   // if the current point is outside the output image, no computation needed
   if (udx >= out_width || vdx >= out_height)
     return;
-
+  
   // flat index to pixel in *intensity and *photon_prob
   // int img_dx = vdx * out_width + udx;
   int img_dx = (udx * out_height) + vdx;
@@ -498,14 +512,47 @@ __global__ void projectKernel(
   if (ATTENUATE_OUTSIDE_VOLUME) {
     area_density[AIR_INDEX] += (minAlpha / step) * AIR_DENSITY;
   }
-
+  
   // trace (if doing the last segment separately, need to use num_steps - 1
   for (int t = 0; t < num_steps; t++) {
-    LOAD_SEGS_AT_ALPHA; // initializes p{x,y,z}[...] and
+    
+    do { 
+      
+      if (do_trace[0]) { 
+        do { 
+          px[0] = sx_ijk[0] + alpha * rx_ijk[0] - 0.5; 
+          py[0] = sy_ijk[0] + alpha * ry_ijk[0] - 0.5; 
+          pz[0] = sz_ijk[0] + alpha * rz_ijk[0] - 0.5; } 
+          while (0); 
+          
+        do { 
+          do { 
+            float value = round( cubicTex3D(seg_tex[0 * 3 + 0], make_float3(px[0], py[0], pz[0]))); 
+            seg_at_alpha[0][0] = value; 
+            printf("%f", value); } 
+            while (0);
+            return; 
+          do { 
+            float value = round( cubicTex3D<float, float>(seg_tex[0 * 3 + 1], make_float3(px[0], py[0], pz[0]))); 
+            seg_at_alpha[0][1] = value; 
+            printf("%f", value); } 
+            while (0);
+          do { 
+            float value = round( cubicTex3D<float, float>(seg_tex[0 * 3 + 2], make_float3(px[0], py[0], pz[0]))); 
+            seg_at_alpha[0][2] = value; 
+            printf("%f", value); } 
+            while (0); } 
+          while (0); 
+        } 
+      } 
+      while (0);
+
+    //LOAD_SEGS_AT_ALPHA; // initializes p{x,y,z}[...] and
                         // seg_at_alpha[...][...]
     // if (debug) printf("  loaded segs\n"); // This is the one that seems to
     // take a half a second.
     //
+    return;
     curr_priority = NUM_VOLUMES;
     n_vols_at_curr_priority = 0;
     for (int i = 0; i < NUM_VOLUMES; i++) {
@@ -553,10 +600,13 @@ __global__ void projectKernel(
       weight *= (0 == t || num_steps - 1 == t) ? 0.5f : 1.0f;
 
       INTERPOLATE(weight);
+
     }
     alpha += step;
   }
 
+
+  return;
   // Attenuate from the end of the volume to the detector.
   if (ATTENUATE_OUTSIDE_VOLUME) {
     area_density[AIR_INDEX] += (ray_length - maxAlpha) / step * AIR_DENSITY;
@@ -653,20 +703,20 @@ __global__ void projectKernel(
 #if NUM_MATERIALS == 1
 #define RESAMPLE_TEXTURES(vol_id)                                              \
   do {                                                                         \
-    density_sample[vol_id] = tex3D<float>(volume_tex[vol_id],inp_x, inp_y, inp_z);       \
+    density_sample[vol_id] = tex3D<float>(VOL_TEX(vol_id),inp_x, inp_y, inp_z);       \
     mat_sample[vol_id][0] = cubicTex3D<float, float>(SEG_TEX(vol_id,0), make_float3(inp_x, inp_y, inp_z));   \
   } while (0)
 #elif NUM_MATERIALS == 2
 #define RESAMPLE_TEXTURES(vol_id)                                              \
   do {                                                                         \
-    density_sample[vol_id] = tex3D<float>(volume_tex[vol_id], inp_x, inp_y, inp_z);       \
+    density_sample[vol_id] = tex3D<float>(VOL_TEX(vol_id), inp_x, inp_y, inp_z);       \
     mat_sample[vol_id][0] = cubicTex3D<float, float>(SEG_TEX(vol_id,0), make_float3(inp_x, inp_y, inp_z));   \
     mat_sample[vol_id][1] = cubicTex3D<float, float>(SEG_TEX(vol_id,1), make_float3(inp_x, inp_y, inp_z));   \
   } while (0)
 #elif NUM_MATERIALS == 3
 #define RESAMPLE_TEXTURES(vol_id)                                              \
     do {                                                                         \
-      density_sample[vol_id] = tex3D<float>(volume_tex[vol_id], inp_x, inp_y, inp_z);       \
+      density_sample[vol_id] = tex3D<float>(VOL_TEX(vol_id), inp_x, inp_y, inp_z);       \
       mat_sample[vol_id][0] = cubicTex3D(SEG_TEX(vol_id,0), make_float3(inp_x, inp_y, inp_z));   \
       mat_sample[vol_id][1] = cubicTex3D(SEG_TEX(vol_id,1), make_float3(inp_x, inp_y, inp_z));   \
       mat_sample[vol_id][2] = cubicTex3D(SEG_TEX(vol_id,2), make_float3(inp_x, inp_y, inp_z));   \
@@ -697,8 +747,9 @@ __global__ void resample_megavolume(
     char *output_mat_id,   // volume-sized array to hold the material IDs of the
                            // voxels,
     int offsetX, int offsetY, int offsetZ,
-    cudaTextureObject_t volume_tex[NUM_VOLUMES],
-    cudaTextureObject_t seg_tex[NUM_VOLUMES*NUM_MATERIALS]) {
+    const unsigned long long volume_tex[NUM_VOLUMES],
+    const unsigned long long seg_tex[NUM_VOLUMES*NUM_MATERIALS]
+    ) {
   /*
    * Sample in voxel centers.
    *
