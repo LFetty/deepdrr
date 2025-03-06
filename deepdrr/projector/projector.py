@@ -392,7 +392,7 @@ class Projector(object):
     def output_size(self) -> int:
         return int(np.prod(self.output_shape))
 
-    @timing
+    
     def project(
         self,
         *camera_projections: geo.CameraProjection,
@@ -934,7 +934,7 @@ class Projector(object):
                     texref.set_filter_mode(cuda.filter_mode.LINEAR)
                 else:
                     raise RuntimeError("Invalid texref filter mode")
-    @timing
+    
     def initialize(self):
         """Allocate GPU memory and transfer the volume, segmentations to GPU."""
         if self.initialized:
@@ -1576,7 +1576,7 @@ class Projector(object):
                 self.scatter_deposits_gpu.free()
                 self.num_scattered_hits_gpu.free()
                 self.num_unscattered_hits_gpu.free()
-
+                
         self.initialized = False
 
     def __enter__(self):
