@@ -27,6 +27,19 @@ from .mcgpu_compton_data import COMPTON_DATA
 from .mcgpu_mfp_data import MFP_DATA
 from .mcgpu_rita_samplers import rita_samplers
 
+from functools import wraps
+
+def timing(f):
+    @wraps(f)
+    def wrap(*args, **kw):
+        ts = time.time()
+        result = f(*args, **kw)
+        te = time.time()
+        print('func:%r args:[%r, %r] took: %2.4f sec' % \
+          (f.__name__, args, kw, te-ts))
+        return result
+    return wrap
+
 log = logging.getLogger(__name__)
 
 try:
@@ -379,6 +392,7 @@ class Projector(object):
     def output_size(self) -> int:
         return int(np.prod(self.output_shape))
 
+    @timing
     def project(
         self,
         *camera_projections: geo.CameraProjection,
@@ -920,7 +934,7 @@ class Projector(object):
                     texref.set_filter_mode(cuda.filter_mode.LINEAR)
                 else:
                     raise RuntimeError("Invalid texref filter mode")
-
+    @timing
     def initialize(self):
         """Allocate GPU memory and transfer the volume, segmentations to GPU."""
         if self.initialized:
