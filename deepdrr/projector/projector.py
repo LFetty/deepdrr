@@ -88,7 +88,7 @@ def _get_texture(array:np.ndarray) -> cp.cuda.TextureObject:
     tex_desc = cp.cuda.texture.TextureDescriptor(addressModes=(runtime.cudaAddressModeClamp, 
                                                                runtime.cudaAddressModeClamp, 
                                                                runtime.cudaAddressModeClamp),
-                                         filterMode=runtime.cudaFilterModeLinear,
+                                         filterMode=runtime.cudaFilterModePoint,
                                          readMode=runtime.cudaReadModeElementType, 
                                          borderColors=None, 
                                          normalizedCoords=False)
