@@ -15,7 +15,7 @@
 // __device__ cudaTextureObject_t seg_tex;
 
 #ifndef NUM_MATERIALS
-#define NUM_MATERIALS 3//14
+#define NUM_MATERIALS 14
 #endif
 
 #ifndef NUM_VOLUMES
@@ -338,11 +338,11 @@ __global__ void projectKernel(
     cudaTextureObject_t volume_tex_0, //cudaTextureObject_t
     cudaTextureObject_t  seg_tex_0,
     cudaTextureObject_t  seg_tex_1,
-    cudaTextureObject_t  seg_tex_2,
+    //cudaTextureObject_t  seg_tex_2,
     float *out
   ) {
-    cudaTextureObject_t volume_tex[1] = {volume_tex_0};
-    cudaTextureObject_t seg_tex[3] = {seg_tex_0, seg_tex_1, seg_tex_2};
+    cudaTextureObject_t volume_tex[] = {volume_tex_0};
+    cudaTextureObject_t seg_tex[] = {seg_tex_0, seg_tex_1};
   // The output image has the following coordinate system, with cell-centered
   // sampling. y is along the fast axis (columns), x along the slow (rows).
   //

@@ -74,7 +74,7 @@ NUMBYTES_INT8 = 1
 NUMBYTES_INT32 = 4
 NUMBYTES_FLOAT32 = 4
 
-@timing
+
 def _get_texture(array:np.ndarray) -> cp.cuda.TextureObject:
     """Get a texture object from a numpy array.
 
@@ -82,7 +82,7 @@ def _get_texture(array:np.ndarray) -> cp.cuda.TextureObject:
         array (np.ndarray): The array to convert to a texture object.
 
     Returns:
-        cupy.cuda.TextureObject: The texture object.
+        cupy.cuda.texture.TextureObject: The texture object.
     """
     # Create 3D CUDA array for segmentation
     tex_desc = cp.cuda.texture.TextureDescriptor(addressModes=(runtime.cudaAddressModeClamp, 
@@ -444,7 +444,7 @@ class Projector(object):
     @property
     def output_size(self) -> int:
         return int(np.prod(self.output_shape))
-    @timing
+
     def project(
         self,
         *camera_projections: geo.CameraProjection,
@@ -551,7 +551,7 @@ class Projector(object):
                 self.volumes_texref[0],
                 self.segmentations_texref[0],
                 self.segmentations_texref[1],
-                self.segmentations_texref[2],
+                #self.segmentations_texref[2],
                 out
             ]
 
@@ -952,7 +952,7 @@ class Projector(object):
         volume_ptr.copy_from(volume)
         
     def update_segmentation_textures(self, vol_id:int, seg_id:int, volume:cp.ndarray):
-        segmentation_ptr = self.segmentations_texref_array[vol_id*self.num_materials + seg_id]
+        segmentation_ptr = self.segmentations_texref_array[vol_id*len(self.all_materials) + seg_id]
         segmentation_ptr.copy_from(volume)
 
     def updateVolumeAsGPUArray(self, vol_gpu):
@@ -1023,7 +1023,7 @@ class Projector(object):
         
         return seg_textures, seg_textures_array
 
-    @timing
+
     def initialize(self):
         """Allocate GPU memory and transfer the volume, segmentations to GPU."""
         if self.initialized:
