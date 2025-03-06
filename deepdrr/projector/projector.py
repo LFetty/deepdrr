@@ -46,18 +46,17 @@ except RuntimeError as e:
     log.warning(f"Running without pycuda, possibly in subprocess: {e}")
 
 
-def import_pycuda():
-    """Import pycuda and return the context.
+# def import_pycuda():
+#     """Import pycuda and return the context.
 
-    Returns:
-        pycuda.autoinit.context: The pycuda context.
-    """
-    if "pycuda" not in globals():
-        import pycuda.autoprimaryctx
-        import pycuda.driver as cuda
-        import pycuda.autoinit
-        import pycuda.compiler
-
+#     Returns:
+#         pycuda.autoinit.context: The pycuda context.
+#     """
+#     if "pycuda" not in globals():
+#         import pycuda.autoprimaryctx
+#         import pycuda.driver as cuda
+#         import pycuda.autoinit
+#         import pycuda.compiler
 
 NUMBYTES_INT8 = 1
 NUMBYTES_INT32 = 4
@@ -90,12 +89,12 @@ def _get_texture(array:np.ndarray) -> cp.cuda.TextureObject:
     
     
     arr=cp.asarray(np.moveaxis(array, [0, 1, 2], [2, 1, 0]).copy(), order='C')
-    width, height, depth = arr.shape
+    depth, height, width = arr.shape
     
     cuda_array = cp.cuda.texture.CUDAarray(desc=channelformat_desc, 
-                                           width=depth,#width, 
+                                           width=width, 
                                            height=height, 
-                                           depth=width,#depth, 
+                                           depth=depth, 
                                            flags=0)
     
     cuda_array.copy_from(arr)
@@ -370,7 +369,7 @@ class Projector(object):
             attenuate_outside_volume=attenuate_outside_volume,
         )
         self.project_kernel = self.mod.get_function("projectKernel")
-        self.project_kernel.compile(log_stream=sys.stdout)
+        #self.project_kernel.compile(log_stream=sys.stdout)
 
         if self.scatter_num > 0:
             self.scatter_mod = _get_kernel_scatter_module(len(self.all_materials))
@@ -1050,7 +1049,6 @@ class Projector(object):
         self.voxelSizeZ_gpu =cp.zeros((len(self.volumes),)).astype(cp.float32)
 
         for i, _vol in enumerate(self.volumes):
-            gpu_ptr_offset = NUMBYTES_FLOAT32 * i
             self.minPointX_gpu[i] = np.float32(-0.5)
             self.minPointY_gpu[i] = np.float32(-0.5)
             self.minPointZ_gpu[i] = np.float32(-0.5)
@@ -1089,7 +1087,7 @@ class Projector(object):
         contiguous_energies = np.ascontiguousarray(noncont_energies, dtype=np.float32)
         n_bins = contiguous_energies.shape[0]
         self.energies_gpu = cp.asarray(contiguous_energies)
-        log.debug(f"bytes alloc'd for self.energies_gpu: {n_bins * NUMBYTES_FLOAT32}")
+        #log.debug(f"bytes alloc'd for self.energies_gpu: {n_bins * NUMBYTES_FLOAT32}")
 
         # allocate and transfer spectrum pdf (4 bytes to a float32)
         noncont_pdf = self.spectrum[:, 1] / np.sum(self.spectrum[:, 1])
@@ -1097,7 +1095,7 @@ class Projector(object):
         assert contiguous_pdf.shape == contiguous_energies.shape
         assert contiguous_pdf.shape[0] == n_bins
         self.pdf_gpu = cp.asarray(contiguous_pdf)
-        log.debug(f"bytes alloc'd for self.pdf_gpu {n_bins * NUMBYTES_FLOAT32}")
+        #log.debug(f"bytes alloc'd for self.pdf_gpu {n_bins * NUMBYTES_FLOAT32}")
 
         # precompute, allocate, and transfer the get_absorption_coef(energy, material) table (4 bytes to a float32)
         absorption_coef_table = np.zeros(n_bins * len(self.all_materials)).astype(
@@ -1111,9 +1109,9 @@ class Projector(object):
                     contiguous_energies[bin], mat_name
                 )
         self.absorption_coef_table_gpu = cp.asarray(absorption_coef_table).astype(cp.float32)
-        log.debug(
-            f"size alloc'd for self.absorption_coef_table_gpu: {n_bins * len(self.all_materials) * NUMBYTES_FLOAT32}"
-        )
+        # log.debug(
+        #     f"size alloc'd for self.absorption_coef_table_gpu: {n_bins * len(self.all_materials) * NUMBYTES_FLOAT32}"
+        # )
 
         init_tock = time.perf_counter()
         log.debug(
@@ -1240,9 +1238,7 @@ class Projector(object):
 
                 for vol_id, _vol in enumerate(self.volumes):
                     int_offset = vol_id
-                    arr_offset = (
-                        NUMBYTES_INT32 * np.array(_vol.ijk_from_world).size * vol_id
-                    )
+                    arr_offset = (np.array(_vol.ijk_from_world).size * vol_id)
                     inp_priority_gpu[int_offset] = np.int32(self.priorities[vol_id])
                     inp_voxelBoundX_gpu[int_offset] =  np.int32(_vol.shape[0])
                     inp_voxelBoundY_gpu[int_offset] = np.int32(_vol.shape[1])

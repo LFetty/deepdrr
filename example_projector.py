@@ -5,7 +5,7 @@ import deepdrr
 from deepdrr import geo
 from deepdrr.utils import test_utils, image_utils
 from deepdrr.projector import Projector
-
+import time
 
 def main():
     output_dir = test_utils.get_output_dir()
@@ -17,7 +17,7 @@ def main():
 
     # define the simulated C-arm
     carm = deepdrr.MobileCArm(isocenter=volume.center_in_world, alpha=90, beta=90, degrees=True, pixel_size=0.5)
-
+    start_time = time.time()
     # project in the AP view
     with deepdrr.Projector(
         volume=volume,
@@ -32,7 +32,7 @@ def main():
         #carm.move_to(isocenter_in_world=volume.center_in_world + geo.v(0, 0, z))
         #print(f"Projecting at z={z}")
         image = projector.project()
-
+    print(time.time()-start_time, 'sec')
     path = output_dir / "example_projector_new_inter.png"
     image_utils.save(path, image)
     print(f"saved example projection image to {path.absolute()}")

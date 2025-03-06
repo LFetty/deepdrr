@@ -41,6 +41,7 @@
 import cupy as cp
 from cupy.cuda import runtime
 import numpy as np
+import sys
 
 def _get_texture(array:np.ndarray) -> cp.cuda.texture.TextureObject:
     """Get a texture object from a numpy array.
@@ -71,12 +72,12 @@ def _get_texture(array:np.ndarray) -> cp.cuda.texture.TextureObject:
     width, height, depth = arr.shape
     
     cuda_array = cp.cuda.texture.CUDAarray(desc=channelformat_desc, 
-                                           width=depth,#width, 
+                                           width=width, 
                                            height=height, 
-                                           depth=width,#depth, 
+                                           depth=depth, 
                                            flags=0)
     
-    cuda_array.copy_from(arr)
+    cuda_array.copy_from(np.moveaxis(arr, [0, 1, 2], [2, 1, 0]))
     
     resource_desc = cp.cuda.texture.ResourceDescriptor(restype=runtime.cudaResourceTypeArray, 
                                                        cuArr=cuda_array, 
@@ -92,7 +93,8 @@ def _get_texture(array:np.ndarray) -> cp.cuda.texture.TextureObject:
     return texture
 
 
-kernel = r"""
+kernel = """
+
 // addition
 inline __host__ __device__ float3 operator+(float3 a, float3 b)
 {
@@ -174,8 +176,10 @@ inline __host__ __device__ float3 operator-(float a, float3 b)
 {
 	return make_float3(a - b.x, a - b.y, a - b.z);
 }
-__device__ float cubictex3d(cudaTextureObject_t tex, float3 coord)
+extern "C"{
+__global__ void cubictex3d(cudaTextureObject_t tex, float3 coord, float* out)
 {
+    //return;
 	// shift the coordinate from [0,extent] to [-0.5, extent-0.5]
 	const float3 coord_grid = coord - 0.5f;
 	const float3 index = floor(coord_grid);
@@ -184,7 +188,7 @@ __device__ float cubictex3d(cudaTextureObject_t tex, float3 coord)
  	const float3 one_frac = 1.0f - fraction;
 	const float3 squared = fraction * fraction;
 	const float3 one_sqd = one_frac * one_frac;
-
+    
 	w0 = 1.0f/6.0f * one_sqd * one_frac;
 	w1 = 2.0f/3.0f - 0.5f * squared * (2.0f-fraction);
 	w2 = 2.0f/3.0f - 0.5f * one_sqd * (2.0f-one_frac);
@@ -211,20 +215,32 @@ __device__ float cubictex3d(cudaTextureObject_t tex, float3 coord)
 	float tex111 = tex3D<float>(tex, h1.x, h1.y, h1.z);
 	tex011 = g0.x * tex011 + g1.x * tex111;  //weigh along the x-direction
 	tex001 = g0.y * tex001 + g1.y * tex011;  //weigh along the y-direction
+    
+	out[0] = (g0.z * tex000 + g1.z * tex001);  //weigh along the z-direction
 
-	return (g0.z * tex000 + g1.z * tex001);  //weigh along the z-direction
+}
 }
 """
+imports = """
+#include <stdio.h>
+#include <stdlib.h>
+#include "cuda_runtime.h"
+#include "math_functions.h" """
 
-array = np.zeros((128,128,128), dtype=cp.float32)
+kernel = imports+kernel
+print(kernel)
+array = np.random.random((128,128,128)).astype(cp.float32)
+out = cp.zeros((1), dtype=cp.float32)
 
-
-position = np.array([65.,65.,65.], dtype=cp.float32)
+position = cp.array([65.,65.,65.], dtype=cp.float32)
 texture = _get_texture(array)
 
 
-kernel = cp.RawKernel(code=kernel, name='cubictex3d', backend='nvcc')
+mod = cp.RawModule(code=kernel, backend='nvcc')
+kernel = mod.get_function('cubictex3d')
+
+kernel.compile(log_stream=sys.stdout)
 
 
-out = kernel(block=(8,8,1), grid=(64,64,1), args=tuple((texture, position)))
+out2 = kernel(block=(8,8,1), grid=(64,64,1), args=tuple([texture, position, out]))
 print(out)
