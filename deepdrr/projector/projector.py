@@ -28,6 +28,18 @@ from .mcgpu_rita_samplers import rita_samplers
 import cupy as cp
 from cupy.cuda import runtime
 
+from functools import wraps
+
+def timing(f):
+    @wraps(f)
+    def wrap(*args, **kw):
+        ts = time.time()
+        result = f(*args, **kw)
+        te = time.time()
+        print('func:%r args:[%r, %r] took: %2.4f sec' % \
+          (f.__name__, args, kw, te-ts))
+        return result
+    return wrap
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +74,7 @@ NUMBYTES_INT8 = 1
 NUMBYTES_INT32 = 4
 NUMBYTES_FLOAT32 = 4
 
-
+@timing
 def _get_texture(array:np.ndarray) -> cp.cuda.TextureObject:
     """Get a texture object from a numpy array.
 
@@ -110,7 +122,7 @@ def _get_texture(array:np.ndarray) -> cp.cuda.TextureObject:
                     
                     # Create texture object  
     texture = cp.cuda.texture.TextureObject(ResDesc=resource_desc, TexDesc=tex_desc)
-    return texture
+    return texture, cuda_array
     
 
 
@@ -432,7 +444,7 @@ class Projector(object):
     @property
     def output_size(self) -> int:
         return int(np.prod(self.output_shape))
-
+    @timing
     def project(
         self,
         *camera_projections: geo.CameraProjection,
@@ -934,6 +946,14 @@ class Projector(object):
         else:
             # NULL. Don't need to do solid angle calculation
             self.solid_angle_gpu = np.int32(0)
+    
+    def update_volume_textures(self, vol_id:int, volume:cp.ndarray):
+        volume_ptr = self.volumes_texref_array[vol_id]
+        volume_ptr.copy_from(volume)
+        
+    def update_segmentation_textures(self, vol_id:int, seg_id:int, volume:cp.ndarray):
+        segmentation_ptr = self.segmentations_texref_array[vol_id*self.num_materials + seg_id]
+        segmentation_ptr.copy_from(volume)
 
     def updateVolumeAsGPUArray(self, vol_gpu):
         for vol_id, volume in enumerate(self.volumes):
@@ -971,23 +991,23 @@ class Projector(object):
     def init_textures_for_ct(self):
         # Create CUDA arrays and texture objects
         volume_textures = []
-        volume_textures_ptr = []
+        volume_textures_array = []
 
         for vol in self.volumes:
             # For volume data
             vol_data = np.array(vol)
-            texture = _get_texture(vol_data)
+            texture, array = _get_texture(vol_data)
             volume_textures.append(texture)
-            volume_textures_ptr.append(texture.ptr)
+            volume_textures_array.append(array)
             
-        return volume_textures, cp.array(volume_textures_ptr, dtype=cp.uint64)
+        return volume_textures, volume_textures_array
 
 
     def init_textures_for_seg(self):
         # Create CUDA arrays and texture objects
 
         seg_textures = []
-        seg_textures_ptr = []
+        seg_textures_array = []
        
         for vol_id, _vol in enumerate(self.volumes):
             for mat_id, mat in enumerate(self.all_materials):
@@ -997,13 +1017,13 @@ class Projector(object):
                 else:
                     seg = np.zeros(_vol.shape).astype(np.float32)
                 
-                texture = _get_texture(seg)
+                texture, array = _get_texture(seg)
                 seg_textures.append(texture)
-                seg_textures_ptr.append(texture.ptr)
+                seg_textures_array.append(array)
         
-        return seg_textures, cp.array(seg_textures_ptr, dtype=cp.uint64)
+        return seg_textures, seg_textures_array
 
-
+    @timing
     def initialize(self):
         """Allocate GPU memory and transfer the volume, segmentations to GPU."""
         if self.initialized:
@@ -1017,13 +1037,13 @@ class Projector(object):
 
         # allocate and transfer the volume texture to GPU
         
-        self.volumes_texref, self.volumes_texref_ptr = self.init_textures_for_ct()
+        self.volumes_texref, self.volumes_texref_array = self.init_textures_for_ct()
 
         init_tock = time.perf_counter()
         log.debug(f"time elapsed after intializing volumes: {init_tock - init_tick}")
 
         # List[List[segmentations]], indexing by (vol_id, material_id)
-        self.segmentations_texref, self.segmentations_texref_ptr = self.init_textures_for_seg()
+        self.segmentations_texref, self.segmentations_texref_array = self.init_textures_for_seg()
         # List[List[texrefs]], indexing by (vol_id, material_id)
 
 
