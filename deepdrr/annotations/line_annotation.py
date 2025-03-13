@@ -5,7 +5,7 @@ from typing import List, Optional
 from pathlib import Path
 import numpy as np
 import json
-import pyvista as pv
+
 
 from .fiducials import FiducialList
 from .. import geo, utils
@@ -47,6 +47,10 @@ class LineAnnotation(object):
             anatomical_coordinate_system (Optional[str], optional): [description]. Defaults to None.
         """
         # all points in anatomical coordinates, matching the provided volume.
+        
+        import pyvista as pv
+        
+        
         self.startpoint = geo.point(startpoint)
         self.endpoint = geo.point(endpoint)
         self.volume = volume

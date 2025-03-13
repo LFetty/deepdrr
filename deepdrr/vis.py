@@ -30,8 +30,10 @@ import logging
 from typing import Any, Union, List, Optional
 import numpy as np
 import os
-import pyvista as pv
-
+try:
+    import pyvista as pv
+except ImportError:
+    print("PyVista is not installed. Please install it using `pip install pyvista` if you want to plot stuff.")
 from . import utils
 from . import geo
 
@@ -46,7 +48,7 @@ def show(
     background: str = "white",
     use_cached: Union[bool, List[bool]] = True,
     offscreen: bool = False,
-    mesh: Optional[pv.PolyData] = None,
+    mesh: Optional["pv.PolyData"] = None,
     mesh_color: str = "black",
 ) -> Optional[np.ndarray]:
     """Show the given items in a pyvista window.
@@ -101,7 +103,7 @@ def get_frustum_mesh(
     image_path: Optional[str] = None,
     image_plane_distance: Optional[float] = None,
     full_frustum: bool = True,
-) -> pv.PolyData:
+) -> "pv.PolyData":
     """Get a really simple camera mesh for the camera projections.
 
     Args:

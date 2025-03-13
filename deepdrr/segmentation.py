@@ -1,8 +1,12 @@
 import logging
 import numpy as np
 from pathlib import Path
-import torch
-from torch.autograd import Variable
+try:
+    import torch
+    from torch.autograd import Variable
+except ImportError:
+    print("torch not found")
+    pass
 
 from .network_segmentation import VNet
 from .utils import data_utils

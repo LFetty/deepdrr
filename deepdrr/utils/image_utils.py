@@ -7,7 +7,6 @@ from pathlib import Path
 import cv2
 import matplotlib.pyplot as plt
 from typing import Optional
-import seaborn as sns
 
 from . import heatmap_utils
 from .. import geo
