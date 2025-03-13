@@ -128,7 +128,7 @@ def _get_kernel_projector_module(
     num_materials: int,
     air_index: int,
     attenuate_outside_volume: bool = False,
-) -> cp.cuda.texture.RawModule:
+) -> cp.RawModule:
     """Compile the cuda code for the kernel projector.
 
     Assumes `project_kernel.cu`, `kernel_vol_seg_data.cu`, and `cubic` interpolation library is in the same directory as THIS
@@ -182,7 +182,7 @@ def _get_kernel_projector_module(
     )
 
 
-def _get_kernel_scatter_module(num_materials) -> SourceModule:
+def _get_kernel_scatter_module(num_materials) -> cp.RawModule:
     """Compile the cuda code for the scatter simulation.
 
     Assumes `scatter_kernel.cu` and `scatter_header.cu` are in the same directory as THIS file.
