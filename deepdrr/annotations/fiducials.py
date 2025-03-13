@@ -5,8 +5,7 @@ from typing import List, Literal, Optional
 from pathlib import Path
 import numpy as np
 import json
-import pyvista as pv
-import pandas as pd
+
 
 from .. import geo, utils
 from ..vol import Volume
@@ -102,6 +101,8 @@ class FiducialList:
         cls, path: Path, world_from_anatomical: Optional[geo.FrameTransform] = None
     ):
         # TODO: add support for associated IDs of the fiducials. Should really be a list/dict.
+        import pandas as pd
+        
         data = pd.read_json(path)
         control_points_table = pd.DataFrame.from_dict(
             data["markups"][0]["controlPoints"]

@@ -8,18 +8,23 @@ from typing import Any, Union, Tuple, List, Optional, Dict, Type
 import logging
 import numpy as np
 from pathlib import Path
-import nibabel as nib
 from pydicom.filereader import dcmread
-import nrrd
+try:
+    import nibabel as nib
+    import nrrd
+except ImportError:
+    print("nibabel and/or nrrd are not installed. \n Please install them using `pip install nibabel nrrd` if you want to load nifti or nrrd files.")
 from scipy.spatial.transform import Rotation
 from scipy.interpolate import RegularGridInterpolator
-import pyvista as pv
-
+try:
+    import pyvista as pv
+except ImportError:
+    print("PyVista is not installed. Please install it using `pip install pyvista` if you want to plot stuff.")
 from .. import load_dicom
 from .. import geo
 from .. import utils
 from ..utils import data_utils
-from ..utils import mesh_utils
+
 from ..device import Device
 from ..projector.material_coefficients import material_coefficients
 
@@ -1042,6 +1047,7 @@ class Volume(object):
             pv.PolyData: The surface mesh in anatomical coordinates.
         """
         # Pad data with 0s to avoid open surfaces at the edges.
+        from ..utils import mesh_utils
         data = np.pad(self.data, 1, mode="constant", constant_values=0)
 
         surface = mesh_utils.isosurface(

@@ -7,8 +7,6 @@ import numpy as np
 from skimage.transform import resize
 import pydicom as dicom
 
-from . import segmentation
-
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +143,7 @@ def conv_hu_to_materials_thresholding(hu_values):
 
 def conv_hu_to_materials(hu_values):
     log.info("segmenting volume with Vnet")
+    from . import segmentation
     segmentation_network = segmentation.SegmentationNet()
     materials = segmentation_network.segment(hu_values)
     segmentation_network = None

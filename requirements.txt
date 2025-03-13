@@ -1,18 +1,13 @@
 # general (redundant) requirements
-numpy
-torch
-torchvision
-nibabel
+numpy<2.0.0
 scikit-image
 pydicom
 scipy
 pyvista
-pycuda
+cupy
 pynrrd
 rich
 opencv-python
-seaborn
-pyrender==0.1.43
 
 # development requirements
 black # proper python style

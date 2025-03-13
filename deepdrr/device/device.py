@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
-import pyvista as pv
 
 from .. import geo
 
@@ -168,6 +167,7 @@ class Device(ABC):
         Subclasses may want to override this with more detailed meshes (full=True).
 
         """
+        import pyvista as pv
 
         # In camera frame
         s = geo.p(0, 0, 0)

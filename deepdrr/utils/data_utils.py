@@ -3,7 +3,6 @@ import os
 import logging
 import numpy as np
 from pathlib import Path
-from torchvision.datasets.utils import download_url, extract_archive
 import urllib
 import subprocess
 import json
@@ -50,6 +49,9 @@ def download(
     Returns:
         Path: The path of the downloaded file, or the extracted directory.
     """
+    
+    from torchvision.datasets.utils import download_url, extract_archive
+    
     root = deepdrr_data_dir()
 
     if filename is None:

@@ -34,7 +34,7 @@ from typing import (
 )
 import logging
 from abc import ABC, abstractmethod
-from typing_extensions import Self
+#from typing_extensions import Self
 import numpy as np
 import scipy.spatial.distance
 from scipy.spatial import cKDTree
@@ -148,7 +148,7 @@ class HomogeneousObject(ABC):
         """Get a config dict with the data in this object."""
         return {"data": self.data.tolist()}
 
-    def copy(self) -> Self:
+    def copy(self) -> "Self":
         return self.__class__(**self.get_config())
 
 
@@ -304,7 +304,7 @@ class HasDirection(Primitive):
 class HasLocationAndDirection(HasLocation, HasDirection):
     @classmethod
     @abstractmethod
-    def from_point_direction(cls, point: Point, direction: Vector) -> Self:
+    def from_point_direction(cls, point: Point, direction: Vector) -> "Self":
         """Create an object from a point and a direction.
 
         Args:
@@ -358,10 +358,10 @@ class PointOrVector(Primitive):
         """Get the norm of the vector. Pass any arguments to `np.linalg.norm`."""
         return float(np.linalg.norm(self, *args, **kwargs))
 
-    def __div__(self, other: float) -> Self:
+    def __div__(self, other: float) -> "Self":
         return self * (1 / other)
 
-    def __truediv__(self, other: float) -> Self:
+    def __truediv__(self, other: float) -> "Self":
         return self * (1 / other)
 
     @property
@@ -466,7 +466,7 @@ class Point(PointOrVector, Joinable, HasLocation):
         """Means other - self was called."""
         return -self + other
 
-    def __add__(self, other: Union[Vector, np.ndarray]) -> Self:
+    def __add__(self, other: Union[Vector, np.ndarray]) -> "Self":
         """Can add a vector to a point, but cannot add two points."""
         if isinstance(other, Vector):
             if self.dim != other.dim:
@@ -504,7 +504,7 @@ class Point(PointOrVector, Joinable, HasLocation):
         # TODO: this shouldn't be allowed.
         return self * (-1)
 
-    def lerp(self, other: Point, alpha: float = 0.5) -> Self:
+    def lerp(self, other: Point, alpha: float = 0.5) -> "Self":
         """Linearly interpolate between one point and another.
 
         Args:
@@ -522,7 +522,7 @@ class Point(PointOrVector, Joinable, HasLocation):
         """Get the vector with the same numerical representation as this point."""
         return vector(np.array(self))
 
-    def get_point(self: Self) -> Self:
+    def get_point(self: "Self") -> "Self":
         """Get the point with the same numerical representation as this point."""
         return self.copy()
 
@@ -551,7 +551,7 @@ class Vector(PointOrVector, HasDirection):
         """If other is not a Vector, make it one."""
         return other if issubclass(type(other), Vector) else cls.from_array(other)
 
-    def __mul__(self, other: Union[int, float]) -> Self:
+    def __mul__(self, other: Union[int, float]) -> "Self":
         """Vectors can be multiplied by scalars."""
         if isinstance(other, (int, float, np.number)) or np.isscalar(other):
             data = self.data.copy()
@@ -560,7 +560,7 @@ class Vector(PointOrVector, HasDirection):
         else:
             return NotImplemented
 
-    def __rmul__(self, other: Union[int, float]) -> Self:
+    def __rmul__(self, other: Union[int, float]) -> "Self":
         return self.__mul__(other)
 
     def __matmul__(self, other: Vector) -> float:
@@ -568,7 +568,7 @@ class Vector(PointOrVector, HasDirection):
         other = self.from_any(other)
         return float(np.dot(self.data, other.data))
 
-    def __add__(self, other: Vector) -> Self:
+    def __add__(self, other: Vector) -> "Self":
         """Two vectors can be added to make another vector."""
         if isinstance(other, Vector):
             if self.dim != other.dim:
@@ -587,16 +587,16 @@ class Vector(PointOrVector, HasDirection):
     def __neg__(self) -> Vector:
         return self.__mul__(-1)
 
-    def __sub__(self, other: Self) -> Self:
+    def __sub__(self, other: "Self") -> "Self":
         return self + (-other)
 
     def __rsub__(self, other: Vector):
         return self.__neg__().__add__(other)
 
-    def normalized(self) -> Self:
+    def normalized(self) -> "Self":
         return self * (1 / self.norm())
 
-    def hat(self) -> Self:
+    def hat(self) -> "Self":
         return self.normalized()
 
     def dot(self, other) -> float:
@@ -619,7 +619,7 @@ class Vector(PointOrVector, HasDirection):
         """Gets the point with the same numerical representation as this vector."""
         return point(np.array(self))
 
-    def get_direction(self: Self) -> Self:
+    def get_direction(self:"Self") -> "Self":
         """Gets the vector with the same numerical representation as this vector."""
         return self.copy()
 
@@ -1211,7 +1211,7 @@ class Transform(HomogeneousObject):
         return self @ other
 
     @property
-    def inv(self) -> Self:
+    def inv(self) -> "Self":
         """Get the inverse of the Transform.
 
         Returns:
