@@ -43,32 +43,6 @@ def timing(f):
 
 log = logging.getLogger(__name__)
 
-try:
-    import pycuda.autoprimaryctx
-
-    # import pycuda.autoinit # causes problems when running with pytorch concurrently
-    import pycuda.driver as cuda
-
-    # from pycuda.autoinit import context # also causes problems
-    from pycuda.autoprimaryctx import context  # retains context across multiple calls
-    from pycuda.compiler import SourceModule
-except ImportError:
-    log.warning(f"Running without pycuda: projector operations will fail.")
-except RuntimeError as e:
-    log.warning(f"Running without pycuda, possibly in subprocess: {e}")
-
-
-# def import_pycuda():
-#     """Import pycuda and return the context.
-
-#     Returns:
-#         pycuda.autoinit.context: The pycuda context.
-#     """
-#     if "pycuda" not in globals():
-#         import pycuda.autoprimaryctx
-#         import pycuda.driver as cuda
-#         import pycuda.autoinit
-#         import pycuda.compiler
 
 NUMBYTES_INT8 = 1
 NUMBYTES_INT32 = 4
