@@ -943,39 +943,6 @@ class Projector(object):
         segmentation_ptr = self.segmentations_texref_array[vol_id*len(self.all_materials) + seg_id]
         segmentation_ptr.copy_from(volume)
 
-    def updateVolumeAsGPUArray(self, vol_gpu):
-        for vol_id, volume in enumerate(self.volumes):
-            vol_texref = self.mod.get_texref(f"volume_{vol_id}")
-            cuda.bind_array_to_texref(vol_gpu, vol_texref)
-
-    def updateMasksAsGPUArray(self, masksOnGPU_array, masksOnGPU_gpuarray):
-        for vol_id, _vol in enumerate(self.volumes):
-            seg_for_vol = []
-            texref_for_vol = []
-            for mat_id, mat in enumerate(self.all_materials):
-                seg = None
-                if mat in _vol.materials:
-                    seg = _vol.materials[mat]
-
-
-                seg_from_gpu = np.ascontiguousarray(np.empty(seg.shape, dtype=np.float32))
-                cuda.memcpy_dtoh(seg_from_gpu, masksOnGPU_gpuarray[mat_id].gpudata)
-                _vol.materials[mat] = seg_from_gpu
-                seg_for_vol.append(
-                    masksOnGPU_array[mat_id]
-                )
-
-                texref = self.mod.get_texref(f"seg_{vol_id}_{mat_id}")
-                texref_for_vol.append(texref)
-
-            for seg, texref in zip(seg_for_vol, texref_for_vol):
-                cuda.bind_array_to_texref(seg, texref)
-                if self.mode == "linear":
-                    texref.set_filter_mode(cuda.filter_mode.LINEAR)
-                else:
-                    raise RuntimeError("Invalid texref filter mode")
-
-
     def init_textures_for_ct(self):
         # Create CUDA arrays and texture objects
         volume_textures = []
@@ -1515,10 +1482,12 @@ class Projector(object):
     def free(self):
         """Free the allocated GPU memory."""
         if self.initialized:
-            for vol_id, vol_gpu in enumerate(self.volumes_texref):
+            for vol_gpu, vol_array_gpu in zip(self.volumes_texref, self.volumes_texref_array):
                 del vol_gpu
-            for seg in self.segmentations_texref:
+                del vol_array_gpu
+            for seg, seg_array in zip(self.segmentations_texref, self.segmentations_texref_array):
                 del seg
+                del seg_array
 
             del self.priorities_gpu
 
