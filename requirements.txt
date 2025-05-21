@@ -4,7 +4,7 @@ scikit-image
 pydicom
 scipy
 pyvista
-cupy
+cupy-cuda12x
 pynrrd
 rich
 opencv-python
