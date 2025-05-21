@@ -4,11 +4,7 @@ channels:
   - nvidia
   - conda-forge
 dependencies:
-  - python=3.8
-  - pytorch
-  - torchvision
-  - cudatoolkit=11.1
-  - pycuda
+  - python=3.12
   - pip
   - pip:
       - -r requirements.txt
