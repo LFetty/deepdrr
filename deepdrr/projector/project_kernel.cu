@@ -707,25 +707,40 @@ __global__ void projectKernel(
    * "intensity" calcuation with simply the energies involved.  Later
    * conversion to other physical quanities can be done outside of the kernel.
    */
-  // if (debug)  printf("attenuation\n");
+  // if (debug)  printf("attenuation\n");\
 
-  for (int bin = 0; bin < n_bins; bin++) {
+
     float beer_lambert_exp = 0.0f;
     for (int m = 0; m < NUM_MATERIALS; m++) {
       beer_lambert_exp +=
-          area_density[m] * absorb_coef_table[bin * NUM_MATERIALS + m];
+          area_density[m];// * absorb_coef_table[bin * NUM_MATERIALS + m];
     }
     float photon_prob_tmp =
-        expf(-1.f * beer_lambert_exp) * pdf[bin]; // dimensionless value
+        expf(-1.f * beer_lambert_exp);// * pdf[bin]; // dimensionless value
 
     photon_prob[img_dx] += photon_prob_tmp;
     intensity[img_dx] +=
-        energies[bin] *
+        //energies[bin] *
         photon_prob_tmp; // units: [keV] per unit photon to hit the pixel
-  }
-
-  // if (debug) printf("done with kernel thread\n");
   return;
+
+  // for (int bin = 0; bin < n_bins; bin++) {
+  //   float beer_lambert_exp = 0.0f;
+  //   for (int m = 0; m < NUM_MATERIALS; m++) {
+  //     beer_lambert_exp +=
+  //         area_density[m] * absorb_coef_table[bin * NUM_MATERIALS + m];
+  //   }
+  //   float photon_prob_tmp =
+  //       expf(-1.f * beer_lambert_exp) * pdf[bin]; // dimensionless value
+
+  //   photon_prob[img_dx] += photon_prob_tmp;
+  //   intensity[img_dx] +=
+  //       energies[bin] *
+  //       photon_prob_tmp; // units: [keV] per unit photon to hit the pixel
+  // }
+
+  // // if (debug) printf("done with kernel thread\n");
+  // return;
 }
 
 /*** KERNEL RESAMPLING FUNCTION ***/
