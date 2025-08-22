@@ -519,52 +519,19 @@ __global__ void projectKernel(
   // if (debug) printf("start trace\n");
 
   // Attenuate up to minAlpha, assuming it is filled with air.
-  if (ATTENUATE_OUTSIDE_VOLUME) {
-    area_density[AIR_INDEX] += (minAlpha / step) * AIR_DENSITY;
-  }
+  // if (ATTENUATE_OUTSIDE_VOLUME) {
+  //   area_density[AIR_INDEX] += (minAlpha / step) * AIR_DENSITY;
+  // }
 
   // trace (if doing the last segment separately, need to use num_steps - 1
   for (int t = 0; t < num_steps; t++) {
     
-    //printf("test");
-     
-    // do { 
-      
-    //   if (do_trace[0]) { 
-    //     do { 
-    //       px[0] = sx_ijk[0] + alpha * rx_ijk[0] - 0.5; 
-    //       py[0] = sy_ijk[0] + alpha * ry_ijk[0] - 0.5; 
-    //       pz[0] = sz_ijk[0] + alpha * rz_ijk[0] - 0.5; } 
-    //       while (0); 
-          
-    //     do { 
-    //       do { 
-            
-    //         float value = round( cubicTex3D(seg_tex[0 * 3 + 0], make_float3(px[0], py[0], pz[0]))); 
-    //         seg_at_alpha[0][0] = value;
-    //         } 
-    //         while (0);
-            
-    //       do { 
-    //         float value = round( cubicTex3D(seg_tex[0 * 3 + 1], make_float3(px[0], py[0], pz[0]))); 
-    //         seg_at_alpha[0][1] = value; 
-    //         } 
-    //         while (0);
-    //       do { 
-    //         float value = round( cubicTex3D(seg_tex[0 * 3 + 2], make_float3(px[0], py[0], pz[0]))); 
-    //         seg_at_alpha[0][2] = value; 
-    //         } 
-    //         while (0); } 
-    //       while (0); 
-    //     } 
-    //   } 
-    //   while (0); 
-        
-    LOAD_SEGS_AT_ALPHA; // initializes p{x,y,z}[...] and
+    //LOAD_SEGS_AT_ALPHA; // initializes p{x,y,z}[...] and
                         // seg_at_alpha[...][...]
     // if (debug) printf("  loaded segs\n"); // This is the one that seems to
     // take a half a second.
     //
+    GET_POSITION_FOR_VOL(0);
 
     curr_priority = NUM_VOLUMES;
     n_vols_at_curr_priority = 0;
@@ -602,7 +569,7 @@ __global__ void projectKernel(
       // Outside the bounds of all volumes to trace. Use the default
       // AIR_DENSITY.
       if (ATTENUATE_OUTSIDE_VOLUME) {
-        area_density[AIR_INDEX] += AIR_DENSITY;
+        area_density[AIR_INDEX] += 0.f;//AIR_DENSITY;
       }
     } else {
       float weight = 1.0f / ((float)n_vols_at_curr_priority);
@@ -613,25 +580,25 @@ __global__ void projectKernel(
       // multiply by 0.5, since there will be a final step at the
       // globalMaxAlpha boundary.
       weight *= (0 == t || num_steps - 1 == t) ? 0.5f : 1.0f;
-
-      do { 
-        if (do_trace[0] && (priority[0] == curr_priority)) { 
-          do { 
-            do { 
-              area_density[(0)] += (weight)*tex3D<float>(volume_tex[0], px[0], py[0], pz[0]) * seg_at_alpha[0][0]; } 
-            while (0); 
-            do { 
-              area_density[(1)] += (weight)*tex3D<float>(volume_tex[0], px[0], py[0], pz[0]) * seg_at_alpha[0][1]; } 
-            while (0); 
-            do { 
-              area_density[(2)] += (weight)*tex3D<float>(volume_tex[0], px[0], py[0], pz[0]) * seg_at_alpha[0][2]; } 
-              while (0); 
-            }
-            while (0);
-          } 
-        } while (0);
+      area_density[(0)] += tex3D<float>(volume_tex[0], px[0], py[0], pz[0]);
+      // do { 
+      //   if (do_trace[0] && (priority[0] == curr_priority)) { 
+      //     do { 
+      //       do { 
+      //         area_density[(0)] += (weight)*tex3D<float>(volume_tex[0], px[0], py[0], pz[0]) * seg_at_alpha[0][0]; } 
+      //       while (0); 
+      //       do { 
+      //         area_density[(1)] += (weight)*tex3D<float>(volume_tex[0], px[0], py[0], pz[0]) * seg_at_alpha[0][1]; } 
+      //       while (0); 
+      //       // do { 
+      //       //   area_density[(2)] += (weight)*tex3D<float>(volume_tex[0], px[0], py[0], pz[0]) * seg_at_alpha[0][2]; } 
+      //       //   while (0); 
+      //        }
+      //       while (0);
+      //     } 
+      //   } while (0);
       // INTERPOLATE(weight);
-      
+
       // for (int m = 0; m < NUM_MATERIALS; m++) {
       //   out[m] = area_density[m];
       // }
@@ -642,9 +609,9 @@ __global__ void projectKernel(
   }
   
   // Attenuate from the end of the volume to the detector.
-  if (ATTENUATE_OUTSIDE_VOLUME) {
-    area_density[AIR_INDEX] += (ray_length - maxAlpha) / step * AIR_DENSITY;
-  }
+  // if (ATTENUATE_OUTSIDE_VOLUME) {
+  //   area_density[AIR_INDEX] += (ray_length - maxAlpha) / step * AIR_DENSITY;
+  // }
 
   // if (debug) printf("finished trace, num_steps: %d\n", num_steps);
 
@@ -654,9 +621,9 @@ __global__ void projectKernel(
   }
 
   // Convert to centimeters
-  for (int m = 0; m < NUM_MATERIALS; m++) {
-    area_density[m] /= 10.0f;
-  }
+  // for (int m = 0; m < NUM_MATERIALS; m++) {
+  //   area_density[m] /= 10.0f;
+  // }
 
   /* Up to this point, we have accomplished the original projectKernel
    * functionality. The next steps to do are combining the forward_projections
@@ -707,40 +674,43 @@ __global__ void projectKernel(
    * "intensity" calcuation with simply the energies involved.  Later
    * conversion to other physical quanities can be done outside of the kernel.
    */
-  // if (debug)  printf("attenuation\n");\
-
-
-    float beer_lambert_exp = 0.0f;
-    for (int m = 0; m < NUM_MATERIALS; m++) {
-      beer_lambert_exp +=
-          area_density[m];// * absorb_coef_table[bin * NUM_MATERIALS + m];
-    }
-    float photon_prob_tmp =
-        expf(-1.f * beer_lambert_exp);// * pdf[bin]; // dimensionless value
-
-    photon_prob[img_dx] += photon_prob_tmp;
+  // if (debug)  printf("attenuation\n");
+    photon_prob[img_dx] += area_density[0];
     intensity[img_dx] +=
         //energies[bin] *
-        photon_prob_tmp; // units: [keV] per unit photon to hit the pixel
+        area_density[0];
+
+    // float beer_lambert_exp = 0.0f;
+    // for (int m = 0; m < NUM_MATERIALS; m++) {
+    //   beer_lambert_exp +=
+    //       area_density[m];// * absorb_coef_table[bin * NUM_MATERIALS + m];
+    // }
+    // float photon_prob_tmp = beer_lambert_exp;
+    //     //expf(-1.f * beer_lambert_exp);// * pdf[bin]; // dimensionless value
+
+    // photon_prob[img_dx] += photon_prob_tmp;
+    // intensity[img_dx] +=
+    //     //energies[bin] *
+    //     photon_prob_tmp; // units: [keV] per unit photon to hit the pixel
   return;
 
-  // for (int bin = 0; bin < n_bins; bin++) {
-  //   float beer_lambert_exp = 0.0f;
-  //   for (int m = 0; m < NUM_MATERIALS; m++) {
-  //     beer_lambert_exp +=
-  //         area_density[m] * absorb_coef_table[bin * NUM_MATERIALS + m];
-  //   }
-  //   float photon_prob_tmp =
-  //       expf(-1.f * beer_lambert_exp) * pdf[bin]; // dimensionless value
+//   for (int bin = 0; bin < n_bins; bin++) {
+//     float beer_lambert_exp = 0.0f;
+//     for (int m = 0; m < NUM_MATERIALS; m++) {
+//       beer_lambert_exp +=
+//           area_density[m] * absorb_coef_table[bin * NUM_MATERIALS + m];
+//     }
+//     float photon_prob_tmp =
+//         expf(-1.f * beer_lambert_exp) * pdf[bin]; // dimensionless value
 
-  //   photon_prob[img_dx] += photon_prob_tmp;
-  //   intensity[img_dx] +=
-  //       energies[bin] *
-  //       photon_prob_tmp; // units: [keV] per unit photon to hit the pixel
-  // }
+//     photon_prob[img_dx] += photon_prob_tmp;
+//     intensity[img_dx] +=
+//         energies[bin] *
+//         photon_prob_tmp; // units: [keV] per unit photon to hit the pixel
+//   }
 
-  // // if (debug) printf("done with kernel thread\n");
-  // return;
+//   // if (debug) printf("done with kernel thread\n");
+//   return;
 }
 
 /*** KERNEL RESAMPLING FUNCTION ***/

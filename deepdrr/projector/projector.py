@@ -554,19 +554,19 @@ class Projector(object):
             # log.info("args: {}".format('\n'.join(map(str, args))))
             # log.info(f"offset_w: {offset_w}, offset_h: {offset_h}")
             # log.info(f"block: {block}, grid: {(blocks_w, blocks_h)}")
-            if blocks_w <= self.max_block_index and blocks_h <= self.max_block_index:
-                self.project_kernel(block=block, grid=(blocks_w, blocks_h, 1), args=tuple(args))
-            else:
-                log.debug("Running kernel patchwise")
-                for w in range((blocks_w - 1) // (self.max_block_index + 1)):
-                    for h in range((blocks_h - 1) // (self.max_block_index + 1)):
-                        args[-4] = np.int32(w * self.max_block_index)
-                        args[-3] = np.int32(h * self.max_block_index)
-                        self.project_kernel(
-                            block,
-                            (self.max_block_index, self.max_block_index),
-                            args
-                        )
+            # if blocks_w <= self.max_block_index and blocks_h <= self.max_block_index:
+            self.project_kernel(block=block, grid=(blocks_w, blocks_h, 1), args=tuple(args))
+            # else:
+            #     log.debug("Running kernel patchwise")
+            #     for w in range((blocks_w - 1) // (self.max_block_index + 1)):
+            #         for h in range((blocks_h - 1) // (self.max_block_index + 1)):
+            #             args[-4] = np.int32(w * self.max_block_index)
+            #             args[-3] = np.int32(h * self.max_block_index)
+            #             self.project_kernel(
+            #                 block,
+            #                 (self.max_block_index, self.max_block_index),
+            #                 args
+            #             )
                         #TODO:required?
                         #context.synchronize()
 
